@@ -1,0 +1,29 @@
+# RiseApp / Data Lineage Detection - XYZ Bank
+
+data:
+  blob: data/blob
+  sql: data/sql
+  vectordb: data/vectordb
+
+logs:
+  dir: logs
+
+embedding:
+  provider: huggingface   # huggingface | google
+  model: sentence-transformers/all-MiniLM-L6-v2
+
+chunking:
+  size: 512
+  overlap: 64
+
+lineage:
+  top_k: 5
+
+agents:
+  default_model: gemini-2.0-flash
+  lineage_detect:
+    model: gemini-2.0-flash
+  brand_classifier:
+    model: gemini-2.0-flash
+  brand_validation:
+    model: gemini-2.0-flash
