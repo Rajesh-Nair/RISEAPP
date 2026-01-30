@@ -44,7 +44,7 @@ class PromptLoader:
         """Load a prompt from a file.
         
         Args:
-            filename: Name of the prompt file (e.g., "brand_classifier_system.md")
+            filename: Name of the prompt file (e.g., "lineage_detect_system.md")
             use_cache: Whether to use cached version if available
             
         Returns:
@@ -91,9 +91,9 @@ class PromptLoader:
             
         Example:
             prompt = loader.format_prompt(
-                "classify_template.md",
-                text="Shopping at AMAZON",
-                categories="Category 1, Category 2"
+                "lineage_detect_match.md",
+                internal_chunk="...",
+                candidates_block="..."
             )
         """
         template = self.load_prompt(filename)

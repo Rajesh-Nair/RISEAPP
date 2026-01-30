@@ -1,6 +1,5 @@
 """Tests for FAISS store."""
 
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +16,7 @@ except ImportError:
 def test_faiss_add_search() -> None:
     from src.vectordb.faiss_store import FaissStore
     dim = 4
-    path = Path(tempfile.mkdtemp()) / "vd"
+    path = Path(__file__).resolve().parent / ".faiss_test_tmp" / "vd"
     store = FaissStore(dim=dim, path=path)
     store.clear()
     ids = ["a", "b", "c"]

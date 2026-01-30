@@ -14,5 +14,9 @@ def get_embedding() -> BaseEmbedding:
     if provider == "google":
         return GoogleEmbedding(model_name=model or "gemini-embedding-001")
     if provider == "huggingface":
-        return HuggingFaceEmbedding(model_name=model or "sentence-transformers/all-MiniLM-L6-v2")
+        model = model or "sentence-transformers/all-MiniLM-L6-v2"
+        local = cfg.project_root / model
+        if local.exists():
+            model = str(local.resolve())
+        return HuggingFaceEmbedding(model_name=model)
     raise ValueError(f"Unknown embedding provider: {provider}. Use 'google' or 'huggingface'.")

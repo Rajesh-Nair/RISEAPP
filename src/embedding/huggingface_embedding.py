@@ -24,7 +24,7 @@ class HuggingFaceEmbedding(BaseEmbedding):
     def embed(self, texts: List[str]) -> np.ndarray:
         if not texts:
             return np.zeros((0, self.embedding_dim()), dtype=np.float32)
-        out = self._model.encode(texts, convert_to_numpy=True, dtype="float32")
+        out = self._model.encode(texts, convert_to_numpy=True)
         return np.asarray(out, dtype=np.float32)
 
     def embedding_dim(self) -> int:

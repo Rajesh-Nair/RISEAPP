@@ -65,7 +65,7 @@ class Config:
         return p
 
     def get_model_for_agent(self, agent_name: str) -> str:
-        """Return model name for an agent (e.g. lineage_detect, brand_classifier)."""
+        """Return model name for an agent (e.g. lineage_detect)."""
         m = self.get(f"agents.{agent_name}.model") or self.get("agents.default_model")
         if not m:
             raise CustomException(f"No model configured for agent {agent_name}")
