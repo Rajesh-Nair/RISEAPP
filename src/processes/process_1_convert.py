@@ -1,5 +1,6 @@
 """Process-1: Scan PDFs in blob, convert to HTML/MD, update documents table."""
 
+import traceback
 from pathlib import Path
 
 import pymupdf
@@ -19,12 +20,14 @@ def _convert_pdf(pdf_path: Path, out_dir: Path) -> tuple[bool, bool]:
     html_path = out_dir / (pdf_path.stem + ".html")
     md_path = out_dir / (pdf_path.stem + ".md")
     try:
-        doc = pymupdf.open(pdf_path)
+        # PyMuPDF on Windows expects a string path; pathlib.Path can raise or produce empty errors
+        doc = pymupdf.open(str(pdf_path))
         html_parts = []
         md_parts = []
-        for i, page in enumerate(doc):
+        # PyMuPDF get_text supports: "text", "html", "xhtml", "dict", "blocks", "words", "json", etc. NOT "markdown"
+        for page in doc:
             html_parts.append(page.get_text("html"))
-            md_parts.append(page.get_text("markdown") or page.get_text())
+            md_parts.append(page.get_text("text") or "")
         doc.close()
         html_content = "\n".join(html_parts)
         md_content = "\n".join(md_parts)
@@ -32,8 +35,22 @@ def _convert_pdf(pdf_path: Path, out_dir: Path) -> tuple[bool, bool]:
         write_text(md_path, md_content)
         return (True, True)
     except Exception as e:
-        logger.warning("PDF convert failed", path=str(pdf_path), error=str(e))
-        raise CustomException(f"Failed to convert {pdf_path}: {e}")
+        tb = traceback.format_exc()
+        # Last frame where exception was raised: file, line number, code line
+        frame = traceback.extract_tb(e.__traceback__)[-1] if e.__traceback__ else None
+        err_msg = str(e).strip() or repr(e)
+        logger.warning(
+            "PDF convert failed",
+            path=str(pdf_path),
+            error=err_msg,
+            exc_type=type(e).__name__,
+            python_file=frame.filename if frame else None,
+            python_line=frame.lineno if frame else None,
+            python_code=frame.line if frame else None,
+            traceback=tb,
+        )
+        loc = f" at {frame.filename}:{frame.lineno}" if frame else ""
+        raise CustomException(f"Failed to convert {pdf_path}: {err_msg}{loc}")
 
 
 def run_process_1() -> None:
