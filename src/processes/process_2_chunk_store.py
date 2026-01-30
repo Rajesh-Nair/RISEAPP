@@ -70,7 +70,15 @@ def run_process_2(force: bool = False) -> None:
         vecs = emb.embed(texts)
         chunk_ids = [f"{doc.id}_{c.index}" for c in chunks]
         for c, cid in zip(chunks, chunk_ids):
-            chunks_repo.insert(cid, doc.id, c.index, c.content, c.metadata)
+            chunks_repo.insert(
+                cid,
+                doc.id,
+                c.index,
+                c.content,
+                c.metadata,
+                start_offset=getattr(c, "start_offset", None),
+                end_offset=getattr(c, "end_offset", None),
+            )
         store.add(chunk_ids, vecs, [doc.doc_type] * len(chunk_ids))
         
         # Mark as chunked

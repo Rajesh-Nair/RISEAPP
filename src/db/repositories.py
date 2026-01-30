@@ -37,6 +37,8 @@ class ChunkRow:
     metadata: Optional[str]
     created_at: str
     lineage_processed_at: Optional[str] = None
+    start_offset: Optional[int] = None
+    end_offset: Optional[int] = None
 
 
 @dataclass
@@ -81,6 +83,8 @@ def _row_to_chunk(r: Any) -> ChunkRow:
         metadata=r["metadata"],
         created_at=r["created_at"],
         lineage_processed_at=_get(r, "lineage_processed_at"),
+        start_offset=_get(r, "start_offset"),
+        end_offset=_get(r, "end_offset"),
     )
 
 
@@ -176,11 +180,22 @@ class ChunksRepo:
     def __init__(self, conn=None):
         self._conn = conn or get_connection()
 
-    def insert(self, chunk_id: str, document_id: int, chunk_index: int, content: str, metadata: Optional[dict] = None) -> None:
+    def insert(
+        self,
+        chunk_id: str,
+        document_id: int,
+        chunk_index: int,
+        content: str,
+        metadata: Optional[dict] = None,
+        start_offset: Optional[int] = None,
+        end_offset: Optional[int] = None,
+    ) -> None:
         meta_str = json.dumps(metadata) if metadata else None
         self._conn.execute(
-            "INSERT OR REPLACE INTO chunks (id, document_id, chunk_index, content, metadata) VALUES (?, ?, ?, ?, ?)",
-            (chunk_id, document_id, chunk_index, content, meta_str),
+            """INSERT OR REPLACE INTO chunks
+               (id, document_id, chunk_index, content, metadata, start_offset, end_offset)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (chunk_id, document_id, chunk_index, content, meta_str, start_offset, end_offset),
         )
         self._conn.commit()
 

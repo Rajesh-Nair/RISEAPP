@@ -15,6 +15,12 @@ from fastapi.staticfiles import StaticFiles
 class ProcessRequest(BaseModel):
     force: bool = False
 
+
+class ChunkRelatedRequest(BaseModel):
+    source_document: str
+    chunk_id: str
+
+
 from utils.config import get_config
 from src.db.connection import get_connection, init_schema
 from src.db.repositories import documents_repo, chunks_repo, lineage_repo
@@ -92,6 +98,73 @@ def get_document_content(
     )
 
 
+# --- Document content + chunks + lineage (annotated for frontend) ---
+@api.get("/documents/{doc_id}/content-annotated")
+def get_document_content_annotated(
+    doc_id: int,
+    format: Literal["html", "md"] = Query("md", alias="format"),
+) -> dict:
+    init_schema(get_connection())
+    doc = documents_repo.get_by_id(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    ext = "html" if format == "html" else "md"
+    path = _safe_content_path(doc.relative_path, ext)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    content = path.read_text(encoding="utf-8", errors="replace")
+    chunks = chunks_repo.list_by_document(doc_id)
+    preview_len = 120
+    chunks_out = []
+    for c in chunks:
+        if doc.doc_type == "internal":
+            links = lineage_repo.list_by_internal(c.id)
+            linked_ids = [r.external_chunk_id for r in links]
+        else:
+            links = lineage_repo.list_by_external(c.id)
+            linked_ids = [r.internal_chunk_id for r in links]
+        preview = (c.content[:preview_len] + "…") if len(c.content) > preview_len else c.content
+        linked_docs = []
+        for lid in linked_ids:
+            linked_chunk = chunks_repo.get(lid)
+            if linked_chunk:
+                linked_doc = documents_repo.get_by_id(linked_chunk.document_id)
+                linked_docs.append(
+                    {
+                        "chunk_id": lid,
+                        "document_id": linked_chunk.document_id,
+                        "name": linked_doc.name if linked_doc else str(linked_chunk.document_id),
+                    }
+                )
+        item = {
+            "chunk_id": c.id,
+            "chunk_index": c.chunk_index,
+            "content": c.content,
+            "content_preview": preview,
+            "linked_chunk_ids": linked_ids,
+            "linked_docs": linked_docs,
+        }
+        if c.start_offset is not None:
+            item["start_offset"] = c.start_offset
+        if c.end_offset is not None:
+            item["end_offset"] = c.end_offset
+        chunks_out.append(item)
+    return {
+        "document": {
+            "id": doc.id,
+            "relative_path": doc.relative_path,
+            "doc_type": doc.doc_type,
+            "name": doc.name,
+            "has_pdf": doc.has_pdf,
+            "has_html": doc.has_html,
+            "has_md": doc.has_md,
+        },
+        "content": content,
+        "format": format,
+        "chunks": chunks_out,
+    }
+
+
 # --- Document chunks with linked chunk IDs ---
 @api.get("/documents/{doc_id}/chunks")
 def get_document_chunks(doc_id: int) -> list:
@@ -110,14 +183,17 @@ def get_document_chunks(doc_id: int) -> list:
             links = lineage_repo.list_by_external(c.id)
             linked_ids = [r.internal_chunk_id for r in links]
         preview = (c.content[:preview_len] + "…") if len(c.content) > preview_len else c.content
-        out.append(
-            {
-                "chunk_id": c.id,
-                "chunk_index": c.chunk_index,
-                "content_preview": preview,
-                "linked_chunk_ids": linked_ids,
-            }
-        )
+        item = {
+            "chunk_id": c.id,
+            "chunk_index": c.chunk_index,
+            "content_preview": preview,
+            "linked_chunk_ids": linked_ids,
+        }
+        if c.start_offset is not None:
+            item["start_offset"] = c.start_offset
+        if c.end_offset is not None:
+            item["end_offset"] = c.end_offset
+        out.append(item)
     return out
 
 
@@ -146,6 +222,38 @@ def get_chunk(chunk_id: str) -> dict:
         "chunk_index": chunk.chunk_index,
         "content": chunk.content,
         "document": doc_info,
+    }
+
+
+# --- Related chunks (for dual-document comparison) ---
+@api.post("/chunk/related")
+def get_chunk_related(body: ChunkRelatedRequest) -> dict:
+    if not CHUNK_ID_PATTERN.match(body.chunk_id):
+        raise HTTPException(status_code=400, detail="Invalid chunk_id format")
+    init_schema(get_connection())
+    chunk = chunks_repo.get(body.chunk_id)
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    if str(chunk.document_id) != body.source_document.strip():
+        raise HTTPException(status_code=404, detail="Chunk not in source document")
+    doc = documents_repo.get_by_id(chunk.document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc.doc_type == "internal":
+        links = lineage_repo.list_by_internal(body.chunk_id)
+        related_ids = [r.external_chunk_id for r in links]
+    else:
+        links = lineage_repo.list_by_external(body.chunk_id)
+        related_ids = [r.internal_chunk_id for r in links]
+    target_document = ""
+    if related_ids:
+        first_related = chunks_repo.get(related_ids[0])
+        if first_related:
+            target_document = str(first_related.document_id)
+    return {
+        "relationship_group_id": body.chunk_id,
+        "target_document": target_document,
+        "related_chunks": related_ids,
     }
 
 
@@ -268,8 +376,21 @@ def upload_pdf(
 
 app.include_router(api)
 
-# Static files: serve from project root "static" folder
+# Compare UI (React app built to static/compare)
 _STATIC = Path(__file__).resolve().parent.parent.parent / "static"
+_COMPARE_INDEX = _STATIC / "compare" / "index.html"
+
+
+@app.get("/compare", include_in_schema=False)
+@app.get("/compare/", include_in_schema=False)
+def serve_compare_ui():
+    """Serve the dual-document compare React app."""
+    if not _COMPARE_INDEX.exists():
+        raise HTTPException(status_code=404, detail="Compare UI not built. Run: cd frontend && npm run build")
+    return FileResponse(_COMPARE_INDEX, media_type="text/html")
+
+
+# Static files: serve from project root "static" folder
 if _STATIC.exists():
     app.mount("/", StaticFiles(directory=str(_STATIC), html=True), name="static")
 

@@ -175,26 +175,104 @@
   }
 
   // --- View document (content + chunks) ---
+  function getViewParams() {
+    const hash = (location.hash || '').slice(1);
+    const q = hash.indexOf('?');
+    if (q < 0) return {};
+    const params = {};
+    hash.slice(q + 1).split('&').forEach(p => {
+      const [k, v] = p.split('=');
+      if (k && v) params[decodeURIComponent(k)] = decodeURIComponent(v);
+    });
+    return params;
+  }
+
   function renderView(id) {
     setActiveNav('documents');
     main.innerHTML = '<div class="loading">Loading document…</div>';
-    Promise.all([
-      api('/documents').then(docs => docs.find(x => x.id === parseInt(id, 10))),
-      api('/documents/' + id + '/chunks').catch(() => []),
-    ]).then(([doc, chunks]) => {
+    const params = getViewParams();
+    const highlightChunkId = params.highlight || params.hl;
+
+    api('/documents/' + id + '/content-annotated?format=md').then(data => {
+      const doc = data.document;
       if (!doc) { main.innerHTML = '<div class="msg msg-error">Document not found.</div>'; return; }
-      renderViewWithDoc(doc, chunks);
-    }).catch(e => {
-      main.innerHTML = '<div class="msg msg-error">' + escapeHtml(e.message) + '</div>';
+      renderViewWithDoc(doc, data.content, data.chunks || [], data.format || 'md', highlightChunkId);
+    }).catch(() => {
+      // Fallback: fetch doc + chunks, use HTML iframe when MD not available
+      Promise.all([
+        api('/documents').then(docs => docs.find(x => x.id === parseInt(id, 10))),
+        api('/documents/' + id + '/chunks').catch(() => []),
+      ]).then(([doc, chunks]) => {
+        if (!doc) { main.innerHTML = '<div class="msg msg-error">Document not found.</div>'; return; }
+        const fmt = doc.has_md ? 'md' : 'html';
+        fetch(API + '/documents/' + id + '/content?format=' + fmt).then(r => r.ok ? r.text() : '')
+          .then(content => renderViewWithDoc(doc, content || '', chunks, fmt, highlightChunkId))
+          .catch(() => renderViewWithDoc(doc, '', chunks, fmt, highlightChunkId));
+      }).catch(e => {
+        main.innerHTML = '<div class="msg msg-error">' + escapeHtml(e.message) + '</div>';
+      });
     });
   }
 
-  function renderViewWithDoc(doc, chunks) {
+  function escapeAttr(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML.replace(/"/g, '&quot;');
+  }
+
+  function injectChunkLinks(content, chunks) {
+    if (!chunks || chunks.length === 0) return content;
+    const positions = [];
+    let searchStart = 0;
+    for (const c of chunks.sort((a, b) => a.chunk_index - b.chunk_index)) {
+      let start, end, segment;
+      if (c.start_offset != null && c.end_offset != null) {
+        start = c.start_offset;
+        end = Math.min(c.end_offset, content.length);
+        segment = content.slice(start, end);
+      } else {
+        const needle = ((c.content || c.content_preview || '').replace(/…$/, '')).trim();
+        if (!needle || needle.length < 20) continue;
+        const pos = content.indexOf(needle, searchStart);
+        if (pos < 0) continue;
+        start = pos;
+        end = pos + needle.length;
+        segment = needle;
+        searchStart = end;
+      }
+      if (start >= end) continue;
+      const linked = (c.linked_docs || [])[0] || (c.linked_chunk_ids || [])[0];
+      const linkedDocId = linked && linked.document_id != null ? linked.document_id : (linked ? String(linked).split('_')[0] : null);
+      const linkedChunkId = linked && linked.chunk_id ? linked.chunk_id : (linked || null);
+      positions.push({ start, end, segment, chunk: c, linkedDocId, linkedChunkId });
+    }
+    const sorted = positions.sort((a, b) => b.start - a.start);
+    let result = content;
+    for (const p of sorted) {
+      const attrs = [
+        'class="chunk-link"',
+        'data-chunk-id="' + escapeAttr(p.chunk.chunk_id) + '"',
+      ];
+      if (p.linkedChunkId) attrs.push('data-linked-chunk-id="' + escapeAttr(p.linkedChunkId) + '"');
+      if (p.linkedDocId) attrs.push('data-linked-doc-id="' + escapeAttr(String(p.linkedDocId)) + '"');
+      const span = '<span ' + attrs.join(' ') + '>' + escapeHtml(p.segment) + '</span>';
+      result = result.slice(0, p.start) + span + result.slice(p.end);
+    }
+    return result;
+  }
+
+  function renderViewWithDoc(doc, content, chunks, format, highlightChunkId) {
     const docId = doc.id;
     const name = doc.name || 'Document ' + docId;
     const formatTabs = [];
-    if (doc.has_html) formatTabs.push('<button type="button" class="tab format-tab active" data-format="html">HTML</button>');
-    if (doc.has_md) formatTabs.push('<button type="button" class="tab format-tab" data-format="md">Markdown</button>');
+    if (doc.has_md) formatTabs.push('<button type="button" class="tab format-tab active" data-format="md">Markdown</button>');
+    if (doc.has_html) formatTabs.push('<button type="button" class="tab format-tab" data-format="html">HTML</button>');
+
+    const useMdWithChunks = format === 'md' && chunks && chunks.length > 0;
+    const contentHtml = useMdWithChunks
+      ? (typeof marked !== 'undefined' ? marked.parse(injectChunkLinks(content, chunks)) : escapeHtml(content))
+      : null;
+
     main.innerHTML = `
       <div class="breadcrumb">
         <a href="#documents">Documents</a> → ${escapeHtml(name)}
@@ -205,43 +283,205 @@
           ${formatTabs.join('')}
           ${doc.has_pdf ? '<a href="' + API + '/documents/' + docId + '/content?format=pdf" class="btn btn-secondary btn-sm" download>Download PDF</a>' : ''}
         </div>
-        <div class="content-panel">
-          <iframe id="content-frame" title="Document content" src="${API}/documents/${docId}/content?format=${doc.has_html ? 'html' : 'md'}"></iframe>
+        <div class="content-panel ${format === 'html' ? 'content-panel-html' : ''}">
+          ${useMdWithChunks
+            ? '<div id="content-body" class="md-body content-with-chunks content-panel-body"></div>'
+            : format === 'html'
+              ? '<iframe id="content-frame" title="Document content"></iframe>'
+              : '<iframe id="content-frame" title="Document content" src="' + API + '/documents/' + docId + '/content?format=md"></iframe>'}
         </div>
-      </div>
-      <div class="card">
-        <h2>Chunks & linked lineage</h2>
-        <div id="chunks-container">Loading chunks…</div>
+        ${chunks && chunks.length > 0 && chunks.some(c => (c.linked_docs && c.linked_docs.length) || (c.linked_chunk_ids && c.linked_chunk_ids.length))
+          ? '<div class="card card-related"><h2>Related chunks</h2><p class="text-muted" style="margin:0 0 0.5rem 0;font-size:0.9rem;">Click a chunk link in the document above to view related doc side-by-side. Or use:</p><div id="related-chunks-list" class="related-chunks-list"></div></div>'
+          : ''}
       </div>
     `;
-    const frame = document.getElementById('content-frame');
+
+    if (useMdWithChunks && contentHtml) {
+      const contentBody = document.getElementById('content-body');
+      contentBody.innerHTML = contentHtml;
+      contentBody.querySelectorAll('.chunk-link').forEach(span => {
+        span.addEventListener('click', function () {
+          const linkedDocId = this.getAttribute('data-linked-doc-id');
+          const linkedChunkId = this.getAttribute('data-linked-chunk-id');
+          if (linkedDocId && linkedChunkId) {
+            location.hash = '#side-by-side/' + docId + '/' + encodeURIComponent(this.getAttribute('data-chunk-id')) + '/' + linkedDocId + '/' + encodeURIComponent(linkedChunkId);
+          }
+        });
+      });
+      if (highlightChunkId) {
+        const el = contentBody.querySelector('.chunk-link[data-chunk-id="' + escapeAttr(highlightChunkId) + '"]');
+        if (el) {
+          el.classList.add('chunk-highlighted');
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
+      }
+    } else if (format === 'html') {
+      fetch(API + '/documents/' + docId + '/content?format=html').then(r => r.text()).then(html => {
+        const frame = document.getElementById('content-frame');
+        const darkStyle = '<style>body,html{background:#0d1117 !important;color:#b8c5d6 !important;font-family:inherit;}</style>';
+        frame.srcdoc = '<html><head>' + darkStyle + '</head><body>' + html + '</body></html>';
+      });
+    }
+
     document.querySelectorAll('.format-tab').forEach(t => {
       t.addEventListener('click', () => {
+        const fmt = t.getAttribute('data-format');
         document.querySelectorAll('.format-tab').forEach(x => x.classList.remove('active'));
         t.classList.add('active');
-        frame.src = API + '/documents/' + docId + '/content?format=' + t.getAttribute('data-format');
+        const panel = document.querySelector('.content-panel');
+        panel.classList.toggle('content-panel-html', fmt === 'html');
+        if (fmt === 'md') {
+          api('/documents/' + docId + '/content-annotated?format=md').then(data => {
+            const useChunks = data.chunks && data.chunks.length;
+            const html = useChunks && typeof marked !== 'undefined'
+              ? marked.parse(injectChunkLinks(data.content, data.chunks))
+              : escapeHtml(data.content);
+            panel.innerHTML = '<div id="content-body" class="md-body content-with-chunks content-panel-body"></div>';
+            const body = document.getElementById('content-body');
+            body.innerHTML = html;
+            body.querySelectorAll('.chunk-link').forEach(span => {
+              span.addEventListener('click', function () {
+                const linkedDocId = this.getAttribute('data-linked-doc-id');
+                const linkedChunkId = this.getAttribute('data-linked-chunk-id');
+                if (linkedDocId && linkedChunkId) {
+                  location.hash = '#side-by-side/' + docId + '/' + encodeURIComponent(this.getAttribute('data-chunk-id')) + '/' + linkedDocId + '/' + encodeURIComponent(linkedChunkId);
+                }
+              });
+            });
+          });
+        } else {
+          panel.innerHTML = '<iframe id="content-frame" title="Document content"></iframe>';
+          fetch(API + '/documents/' + docId + '/content?format=html').then(r => r.text()).then(html => {
+            const frame = document.getElementById('content-frame');
+            const darkStyle = '<style>body,html{background:#0d1117 !important;color:#b8c5d6 !important;font-family:inherit;}</style>';
+            frame.srcdoc = '<html><head>' + darkStyle + '</head><body>' + html + '</body></html>';
+          });
+        }
       });
     });
 
-    const container = document.getElementById('chunks-container');
-    if (!chunks || !chunks.length) {
-      container.innerHTML = '<p class="msg msg-info">No chunks for this document. Run Process 2 to chunk.</p>';
-      return;
+    const relatedList = document.getElementById('related-chunks-list');
+    if (relatedList && chunks && chunks.length > 0) {
+      const links = [];
+      chunks.forEach(c => {
+        const linkedDocs = c.linked_docs || [];
+        const linkedIds = c.linked_chunk_ids || [];
+        const targets = linkedDocs.length > 0 ? linkedDocs : linkedIds.map(id => ({ chunk_id: id, document_id: String(id).split('_')[0], name: id }));
+        targets.forEach(t => {
+          const linkedDocId = t.document_id != null ? t.document_id : String(t).split('_')[0];
+          const linkedChunkId = t.chunk_id || t;
+          const href = '#side-by-side/' + docId + '/' + encodeURIComponent(c.chunk_id) + '/' + linkedDocId + '/' + encodeURIComponent(linkedChunkId);
+          links.push('<a href="' + href + '" class="btn btn-primary btn-sm related-chunk-btn">' + escapeHtml(c.chunk_id) + ' → ' + escapeHtml(linkedChunkId) + '</a>');
+        });
+      });
+      relatedList.innerHTML = links.length > 0 ? links.join(' ') : '<span style="color:var(--text-muted);">No linked chunks. Run Process 3 for lineage.</span>';
     }
-    container.innerHTML = '<ul class="chunk-list"></ul>';
-    const ul = container.querySelector('ul');
-    chunks.forEach(c => {
-      const li = document.createElement('li');
-      li.className = 'chunk-item';
-      const linksHtml = (c.linked_chunk_ids || []).map(linkedId =>
-        '<a href="#compare/' + escapeHtml(c.chunk_id) + '/' + escapeHtml(linkedId) + '" class="btn btn-primary btn-sm">View linked chunk ' + escapeHtml(linkedId) + '</a>'
-      ).join(' ');
-      li.innerHTML = `
-        <strong>Chunk ${c.chunk_index}</strong> (${escapeHtml(c.chunk_id)})
-        <div class="chunk-preview">${escapeHtml(c.content_preview || '')}</div>
-        ${linksHtml ? '<div class="chunk-links">' + linksHtml + '</div>' : '<div class="chunk-links"><span style="color:var(--text-muted);">No linked chunks</span></div>'}
+  }
+
+  function renderSideBySide(docId1, chunkId1, docId2, chunkId2) {
+    setActiveNav('documents');
+    main.innerHTML = '<div class="loading">Loading documents…</div>';
+    Promise.all([
+      api('/documents/' + docId1 + '/content-annotated?format=md'),
+      api('/documents/' + docId2 + '/content-annotated?format=md'),
+    ]).then(([data1, data2]) => {
+      const doc1 = data1.document;
+      const doc2 = data2.document;
+      if (!doc1 || !doc2) {
+        main.innerHTML = '<div class="msg msg-error">Document not found.</div>';
+        return;
+      }
+      const useChunks1 = data1.chunks && data1.chunks.length;
+      const useChunks2 = data2.chunks && data2.chunks.length;
+      const html1 = useChunks1 && typeof marked !== 'undefined'
+        ? marked.parse(injectChunkLinks(data1.content, data1.chunks))
+        : escapeHtml(data1.content);
+      const html2 = useChunks2 && typeof marked !== 'undefined'
+        ? marked.parse(injectChunkLinks(data2.content, data2.chunks))
+        : escapeHtml(data2.content);
+      main.innerHTML = `
+        <div class="breadcrumb">
+          <a href="#documents">Documents</a> →
+          <a href="#view/${docId1}">${escapeHtml(doc1.name)}</a> ↔
+          <a href="#view/${docId2}">${escapeHtml(doc2.name)}</a>
+        </div>
+        <h1>Linked documents</h1>
+        <div class="side-by-side-layout">
+          <div class="side-by-side-pane">
+            <h3>${escapeHtml(doc1.name)}</h3>
+            <div class="side-by-side-scroll content-with-chunks" id="pane-left"></div>
+          </div>
+          <div class="side-by-side-pane">
+            <h3>${escapeHtml(doc2.name)}</h3>
+            <div class="side-by-side-scroll content-with-chunks" id="pane-right"></div>
+          </div>
+        </div>
       `;
-      ul.appendChild(li);
+      const paneLeft = document.getElementById('pane-left');
+      const paneRight = document.getElementById('pane-right');
+      paneLeft.innerHTML = html1;
+      paneRight.innerHTML = html2;
+
+      function alignChunks(clickedEl, clickedPane, otherPane, linkedChunkId) {
+        const otherEl = otherPane.querySelector('.chunk-link[data-chunk-id="' + escapeAttr(linkedChunkId) + '"]');
+        if (!otherEl) return;
+        document.querySelectorAll('.chunk-link.chunk-aligned').forEach(el => el.classList.remove('chunk-aligned'));
+        document.querySelectorAll('.chunk-link.chunk-highlighted').forEach(el => el.classList.remove('chunk-highlighted'));
+        clickedEl.classList.add('chunk-aligned');
+        otherEl.classList.add('chunk-aligned');
+        const clickedRect = clickedEl.getBoundingClientRect();
+        const clickedPaneRect = clickedPane.getBoundingClientRect();
+        const offsetInView = clickedRect.top - clickedPaneRect.top;
+        const targetScrollTop = otherEl.offsetTop - offsetInView;
+        otherPane.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
+      }
+
+      function setupChunkClick(span, myDocId, otherDocId) {
+        span.addEventListener('click', function (e) {
+          e.preventDefault();
+          const cid = this.getAttribute('data-chunk-id');
+          const linkedDocId = this.getAttribute('data-linked-doc-id');
+          const linkedChunkId = this.getAttribute('data-linked-chunk-id');
+          if (!linkedDocId || !linkedChunkId) return;
+          if (linkedDocId === String(otherDocId)) {
+            const clickedPane = this.closest('.side-by-side-scroll');
+            const otherPane = clickedPane === paneLeft ? paneRight : paneLeft;
+            alignChunks(this, clickedPane, otherPane, linkedChunkId);
+          } else {
+            location.hash = '#side-by-side/' + myDocId + '/' + encodeURIComponent(cid) + '/' + linkedDocId + '/' + encodeURIComponent(linkedChunkId);
+          }
+        });
+      }
+
+      paneLeft.querySelectorAll('.chunk-link').forEach(span => setupChunkClick(span, docId1, docId2));
+      paneRight.querySelectorAll('.chunk-link').forEach(span => setupChunkClick(span, docId2, docId1));
+
+      const el1 = paneLeft.querySelector('.chunk-link[data-chunk-id="' + escapeAttr(chunkId1) + '"]');
+      const el2 = paneRight.querySelector('.chunk-link[data-chunk-id="' + escapeAttr(chunkId2) + '"]');
+      if (el1 && el2) {
+        el1.classList.add('chunk-highlighted');
+        el2.classList.add('chunk-highlighted');
+        el1.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        setTimeout(function () {
+          const rect1 = el1.getBoundingClientRect();
+          const paneRect1 = paneLeft.getBoundingClientRect();
+          const offsetInView = rect1.top - paneRect1.top;
+          const targetScrollTop = el2.offsetTop - offsetInView;
+          paneRight.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' });
+          el1.classList.remove('chunk-highlighted');
+          el2.classList.remove('chunk-highlighted');
+          el1.classList.add('chunk-aligned');
+          el2.classList.add('chunk-aligned');
+        }, 300);
+      } else if (el1) {
+        el1.classList.add('chunk-highlighted');
+        el1.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } else if (el2) {
+        el2.classList.add('chunk-highlighted');
+        el2.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    }).catch(err => {
+      main.innerHTML = '<div class="msg msg-error">' + escapeHtml(err.message) + '</div>';
     });
   }
 
@@ -284,13 +524,16 @@
     const hash = (location.hash || '#upload').slice(1);
     const parts = hash.split('/');
     const page = parts[0] || 'upload';
+    const viewId = parts[1] ? parts[1].split('?')[0] : null;
     if (page === 'upload') {
       renderUpload();
     } else if (page === 'documents') {
       const type = parts[1] || '';
       renderDocuments(type === 'external' || type === 'internal' ? type : null);
-    } else if (page === 'view' && parts[1]) {
-      renderView(parts[1]);
+    } else if (page === 'view' && viewId) {
+      renderView(viewId);
+    } else if (page === 'side-by-side' && parts[1] && parts[2] && parts[3] && parts[4]) {
+      renderSideBySide(parts[1], decodeURIComponent(parts[2]), parts[3], decodeURIComponent(parts[4]));
     } else if (page === 'compare' && parts[1] && parts[2]) {
       renderCompare(parts[1], parts[2]);
     } else {

@@ -1,0 +1,178 @@
+:root {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: light dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #0d1117;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  font-weight: 500;
+  color: #58a6ff;
+  text-decoration: inherit;
+}
+a:hover {
+  color: #79c0ff;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Compare page */
+.compare-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0 1rem 1rem;
+}
+
+.compare-header {
+  flex-shrink: 0;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #30363d;
+}
+
+.compare-back {
+  display: inline-block;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.compare-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.compare-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  min-height: 70vh;
+}
+
+@media (max-width: 900px) {
+  .compare-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.compare-loading,
+.compare-error {
+  margin: 2rem 0;
+  color: #8b949e;
+}
+
+.compare-error {
+  color: #f85149;
+}
+
+.compare-hint {
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+  color: #8b949e;
+}
+
+.compare-hint code {
+  background: #21262d;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+/* Document pane */
+.document-pane {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.document-pane-title {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-bottom: 1px solid #30363d;
+  flex-shrink: 0;
+}
+
+.document-pane-scroll {
+  flex: 1;
+  padding: 1rem;
+  min-height: 400px;
+  background: #0d1117;
+}
+
+/* Chunk list */
+.chunk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.chunk-item {
+  cursor: pointer;
+  padding: 0.5rem 0.25rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  transition: background-color 0.15s, outline 0.15s;
+}
+
+.chunk-item:hover {
+  background-color: rgba(56, 189, 248, 0.15);
+}
+
+.chunk-item:focus {
+  outline: 2px solid #58a6ff;
+  outline-offset: 2px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: #1f2328;
+    background-color: #ffffff;
+  }
+  body {
+    background-color: #f6f8fa;
+  }
+  .compare-header {
+    border-bottom-color: #d0d7de;
+  }
+  .compare-back,
+  a {
+    color: #0969da;
+  }
+  .document-pane {
+    background: #ffffff;
+    border-color: #d0d7de;
+  }
+  .document-pane-title {
+    border-bottom-color: #d0d7de;
+  }
+  .document-pane-scroll {
+    background: #f6f8fa;
+  }
+  .chunk-item:hover {
+    background-color: rgba(84, 174, 255, 0.2);
+  }
+  .compare-hint code {
+    background: #d0d7de;
+  }
+}

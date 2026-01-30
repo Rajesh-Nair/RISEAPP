@@ -24,3 +24,13 @@ def test_chunk_text_overlap() -> None:
     assert len(out) >= 2
     concatenated = "".join(c.content for c in out)
     assert "a" in concatenated
+
+
+def test_chunk_text_offsets() -> None:
+    text = "Hello world. " * 20
+    out = chunk_text(text, size=80, overlap=10)
+    assert len(out) >= 1
+    for c in out:
+        assert hasattr(c, "start_offset") and hasattr(c, "end_offset")
+        assert c.start_offset >= 0 and c.end_offset <= len(text)
+        assert text[c.start_offset : c.end_offset] == c.content

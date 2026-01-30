@@ -110,7 +110,8 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
         return _conn
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        _conn = sqlite3.connect(str(path))
+        # check_same_thread=False so the connection can be used from FastAPI worker threads
+        _conn = sqlite3.connect(str(path), check_same_thread=False)
         _conn.row_factory = sqlite3.Row
         _db_path = path
         return _conn
@@ -144,6 +145,14 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         if "lineage_processed_at" not in columns:
             conn.execute("ALTER TABLE chunks ADD COLUMN lineage_processed_at TEXT")
             logger.info("Added lineage_processed_at column to chunks table")
+
+        if "start_offset" not in columns:
+            conn.execute("ALTER TABLE chunks ADD COLUMN start_offset INTEGER")
+            logger.info("Added start_offset column to chunks table")
+
+        if "end_offset" not in columns:
+            conn.execute("ALTER TABLE chunks ADD COLUMN end_offset INTEGER")
+            logger.info("Added end_offset column to chunks table")
         
         conn.commit()
     except Exception as e:

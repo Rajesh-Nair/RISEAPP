@@ -167,6 +167,26 @@ async def test_get_document_chunks(seeded_db):
 
 
 @pytest.mark.asyncio
+async def test_get_document_content_annotated(seeded_db):
+    ext_id = seeded_db["ext_id"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        r = await client.get(f"/api/documents/{ext_id}/content-annotated?format=md")
+        assert r.status_code == 200
+        data = r.json()
+        assert "document" in data
+        assert data["document"]["id"] == ext_id
+        assert "content" in data
+        assert "chunks" in data
+        assert "foo" in data["content"] or ""
+        assert len(data["chunks"]) >= 1
+        assert "chunk_id" in data["chunks"][0]
+        assert "linked_chunk_ids" in data["chunks"][0]
+
+
+@pytest.mark.asyncio
 async def test_get_chunk_by_id(seeded_db):
     ext_id = seeded_db["ext_id"]
     async with AsyncClient(
@@ -217,3 +237,109 @@ async def test_upload_pdf(test_db_and_blob):
         assert "external/test/test" in body["path"]
         assert (blob / "external" / "test" / "test.pdf").exists()
         assert (blob / "external" / "test" / "test.pdf").read_bytes() == pdf_content
+
+
+# --- POST /api/chunk/related ---
+@pytest.mark.asyncio
+async def test_chunk_related_internal_to_external(seeded_db):
+    """Internal chunk returns related external chunks and target_document."""
+    ext_id = seeded_db["ext_id"]
+    int_id = seeded_db["int_id"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        r = await client.post(
+            "/api/chunk/related",
+            json={"source_document": str(int_id), "chunk_id": f"{int_id}_0"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["relationship_group_id"] == f"{int_id}_0"
+        assert data["target_document"] == str(ext_id)
+        assert data["related_chunks"] == [f"{ext_id}_0"]
+
+
+@pytest.mark.asyncio
+async def test_chunk_related_external_to_internal(seeded_db):
+    """External chunk returns related internal chunks and target_document."""
+    ext_id = seeded_db["ext_id"]
+    int_id = seeded_db["int_id"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        r = await client.post(
+            "/api/chunk/related",
+            json={"source_document": str(ext_id), "chunk_id": f"{ext_id}_0"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["relationship_group_id"] == f"{ext_id}_0"
+        assert data["target_document"] == str(int_id)
+        assert data["related_chunks"] == [f"{int_id}_0"]
+
+
+@pytest.mark.asyncio
+async def test_chunk_related_404_invalid_chunk(seeded_db):
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        r = await client.post(
+            "/api/chunk/related",
+            json={"source_document": "1", "chunk_id": "999_0"},
+        )
+        assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_chunk_related_404_wrong_document(seeded_db):
+    ext_id = seeded_db["ext_id"]
+    int_id = seeded_db["int_id"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        # Chunk belongs to internal doc; claim source_document is external
+        r = await client.post(
+            "/api/chunk/related",
+            json={"source_document": str(ext_id), "chunk_id": f"{int_id}_0"},
+        )
+        assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_chunk_related_400_invalid_chunk_id(seeded_db):
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        r = await client.post(
+            "/api/chunk/related",
+            json={"source_document": "1", "chunk_id": "invalid"},
+        )
+        assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_chunk_related_empty_lineage(seeded_db):
+    """Chunk with no lineage returns empty related_chunks and empty target_document."""
+    ext_id = seeded_db["ext_id"]
+    int_id = seeded_db["int_id"]
+    conn = seeded_db["conn"]
+    conn.execute("DELETE FROM lineage")
+    conn.commit()
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        r = await client.post(
+            "/api/chunk/related",
+            json={"source_document": str(int_id), "chunk_id": f"{int_id}_0"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["relationship_group_id"] == f"{int_id}_0"
+        assert data["target_document"] == ""
+        assert data["related_chunks"] == []

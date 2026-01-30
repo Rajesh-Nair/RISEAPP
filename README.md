@@ -88,6 +88,18 @@ This installs dependencies from `pyproject.toml` (e.g. `google-adk`, `google-gen
   - `lineage.top_k`
   - `agents.lineage_detect.model`
 
+### 3. Compare UI (optional)
+
+The **dual-document compare** UI is a React app in `frontend/`. Build it so the API can serve it at `/compare/`:
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+The build writes to `static/compare/`. The API serves the compare app at **`/compare/`** (and `/compare`). Use the hash to pick two documents, e.g. **`/compare/#/1/2`** for document ID 1 vs 2. The compare UI uses the same origin for API calls (`/api`).
+
 ---
 
 ## Folder Structure
@@ -111,6 +123,8 @@ This installs dependencies from `pyproject.toml` (e.g. `google-adk`, `google-gen
 | `src/processes/` | Process-1 (convert), Process-2 (chunk+store), Process-3 (lineage) |
 | `src/vectordb/` | FAISS store |
 | `static/` | Web UI: HTML, CSS, JS (upload, documents list, view, side-by-side lineage) |
+| `static/compare/` | Dual-document compare React app (built from `frontend/`) |
+| `frontend/` | Vite + React compare UI source; build output goes to `static/compare/` |
 | `test/` | Pytest tests (including `test_api.py` for REST API) |
 | `utils/` | Config loader, file I/O |
 

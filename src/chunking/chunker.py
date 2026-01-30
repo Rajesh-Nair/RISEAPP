@@ -18,6 +18,8 @@ class ChunkResult:
     content: str
     index: int
     metadata: Optional[dict] = None
+    start_offset: int = 0
+    end_offset: int = 0
 
 
 def chunk_text(
@@ -39,7 +41,20 @@ def chunk_text(
         chunk = text[start:end]
         chunk = chunk.strip()
         if chunk:
-            out.append(ChunkResult(content=chunk, index=idx, metadata=None))
+            # Store character offsets in original text for mapping back to document
+            slice_text = text[start:end]
+            pos_in_slice = slice_text.find(chunk)
+            chunk_start = start + pos_in_slice if pos_in_slice >= 0 else start
+            chunk_end = chunk_start + len(chunk)
+            out.append(
+                ChunkResult(
+                    content=chunk,
+                    index=idx,
+                    metadata=None,
+                    start_offset=chunk_start,
+                    end_offset=chunk_end,
+                )
+            )
             idx += 1
         start = end - overlap
         if start >= len(text):
