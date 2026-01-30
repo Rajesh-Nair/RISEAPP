@@ -23,6 +23,9 @@ class DocumentRow:
     has_md: bool
     created_at: str
     updated_at: str
+    converted_at: Optional[str] = None
+    chunked_at: Optional[str] = None
+    lineage_at: Optional[str] = None
 
 
 @dataclass
@@ -33,6 +36,7 @@ class ChunkRow:
     content: str
     metadata: Optional[str]
     created_at: str
+    lineage_processed_at: Optional[str] = None
 
 
 @dataclass
@@ -42,6 +46,13 @@ class LineageRow:
     external_chunk_id: str
     confidence: Optional[float]
     created_at: str
+
+
+def _get(r: Any, key: str, default: Any = None) -> Any:
+    """Get key from row (dict or sqlite3.Row)."""
+    if hasattr(r, "get"):
+        return r.get(key, default)
+    return r[key] if key in r.keys() else default
 
 
 def _row_to_doc(r: Any) -> DocumentRow:
@@ -55,6 +66,9 @@ def _row_to_doc(r: Any) -> DocumentRow:
         has_md=bool(r["has_md"]),
         created_at=r["created_at"],
         updated_at=r["updated_at"],
+        converted_at=_get(r, "converted_at"),
+        chunked_at=_get(r, "chunked_at"),
+        lineage_at=_get(r, "lineage_at"),
     )
 
 
@@ -66,6 +80,7 @@ def _row_to_chunk(r: Any) -> ChunkRow:
         content=r["content"],
         metadata=r["metadata"],
         created_at=r["created_at"],
+        lineage_processed_at=_get(r, "lineage_processed_at"),
     )
 
 
@@ -110,6 +125,10 @@ class DocumentsRepo:
         r = self._conn.execute("SELECT * FROM documents WHERE relative_path = ?", (relative_path,)).fetchone()
         return _row_to_doc(r) if r else None
 
+    def get_by_id(self, doc_id: int) -> Optional[DocumentRow]:
+        r = self._conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        return _row_to_doc(r) if r else None
+
     def list_with_md(self, doc_type: Optional[str] = None) -> List[DocumentRow]:
         if doc_type:
             rows = self._conn.execute(
@@ -123,6 +142,34 @@ class DocumentsRepo:
     def list_all(self) -> List[DocumentRow]:
         rows = self._conn.execute("SELECT * FROM documents ORDER BY id").fetchall()
         return [_row_to_doc(r) for r in rows]
+
+    def list_unprocessed_for_chunking(self) -> List[DocumentRow]:
+        """Get docs with MD that haven't been chunked or were updated after chunking."""
+        rows = self._conn.execute(
+            """
+            SELECT * FROM documents 
+            WHERE has_md = 1 
+            AND (chunked_at IS NULL OR updated_at > chunked_at)
+            ORDER BY id
+            """
+        ).fetchall()
+        return [_row_to_doc(r) for r in rows]
+
+    def mark_chunked(self, doc_id: int) -> None:
+        """Set chunked_at = datetime('now')."""
+        self._conn.execute(
+            "UPDATE documents SET chunked_at = datetime('now') WHERE id = ?",
+            (doc_id,),
+        )
+        self._conn.commit()
+
+    def mark_converted(self, doc_id: int) -> None:
+        """Set converted_at = datetime('now')."""
+        self._conn.execute(
+            "UPDATE documents SET converted_at = datetime('now') WHERE id = ?",
+            (doc_id,),
+        )
+        self._conn.commit()
 
 
 class ChunksRepo:
@@ -175,6 +222,27 @@ class ChunksRepo:
         self._conn.commit()
         return cur.rowcount
 
+    def list_unprocessed_internal_chunks(self) -> List[ChunkRow]:
+        """Get internal chunks where lineage_processed_at IS NULL."""
+        rows = self._conn.execute(
+            """
+            SELECT c.* FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE d.doc_type = 'internal'
+            AND c.lineage_processed_at IS NULL
+            ORDER BY c.document_id, c.chunk_index
+            """
+        ).fetchall()
+        return [_row_to_chunk(r) for r in rows]
+
+    def mark_lineage_processed(self, chunk_id: str) -> None:
+        """Set lineage_processed_at = datetime('now')."""
+        self._conn.execute(
+            "UPDATE chunks SET lineage_processed_at = datetime('now') WHERE id = ?",
+            (chunk_id,),
+        )
+        self._conn.commit()
+
 
 class LineageRepo:
     def __init__(self, conn=None):
@@ -204,6 +272,15 @@ class LineageRepo:
 
     def clear_all(self) -> int:
         cur = self._conn.execute("DELETE FROM lineage")
+        self._conn.commit()
+        return cur.rowcount
+
+    def delete_by_internal_chunk(self, internal_chunk_id: str) -> int:
+        """Delete all lineage entries for a specific internal chunk."""
+        cur = self._conn.execute(
+            "DELETE FROM lineage WHERE internal_chunk_id = ?",
+            (internal_chunk_id,),
+        )
         self._conn.commit()
         return cur.rowcount
 

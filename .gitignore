@@ -18,6 +18,7 @@ logs/
 data/sql/*.db
 data/vectordb/
 test/.faiss_test_tmp/
+test/tmp/
 test/.process1_test.db
 
 # Model files

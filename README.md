@@ -10,9 +10,15 @@ RiseApp detects **data lineage** between **external** (regulatory) and **interna
 
 1. **Tracks** documents under `data/blob` (PDF, HTML, MD) in a SQLite `documents` table.
 2. **Chunks** all `.md` files, embeds them (HuggingFace or Google), and stores chunks in SQLite plus a FAISS index under `data/vectordb`.
-3. **Runs** a lineage agent per internal chunk: FAISS retrieves candidate external chunks, the LLM selects which external chunk(s) the internal one interprets, and links are written to a `lineage` table.
+3. **Runs** a lineage agent per internal chunk: FAISS retrieves the closest matched external chunk (via vector similarity), the LLM determines if the internal chunk interprets that external chunk, and links are written to a `lineage` table.
 
 The database supports joins to query lineage in both directions. The embedding implementation is **pluggable** (HuggingFace `all-MiniLM-L6-v2` or Google embeddings), and the lineage agent is runnable via **ADK web** for interactive testing.
+
+### Key Features
+
+- **Incremental Processing**: Each process tracks what has been processed and skips already-processed items on subsequent runs.
+- **Force Mode**: Use `--force` flag to reprocess everything, clearing previous results.
+- **Optimized LLM Calls**: Process-3 uses only the top-1 closest match from vector search, reducing LLM API costs.
 
 ---
 
@@ -101,9 +107,11 @@ This installs dependencies from `pyproject.toml` (e.g. `google-adk`, `google-gen
 | `src/chunking/` | MD chunking |
 | `src/db/` | SQLite connection and repositories |
 | `src/embedding/` | Embedding interface; HuggingFace and Google implementations |
+| `src/api/` | FastAPI app: documents, content, chunks, process, upload |
 | `src/processes/` | Process-1 (convert), Process-2 (chunk+store), Process-3 (lineage) |
 | `src/vectordb/` | FAISS store |
-| `test/` | Pytest tests |
+| `static/` | Web UI: HTML, CSS, JS (upload, documents list, view, side-by-side lineage) |
+| `test/` | Pytest tests (including `test_api.py` for REST API) |
 | `utils/` | Config loader, file I/O |
 
 ---
@@ -120,34 +128,105 @@ This installs dependencies from `pyproject.toml` (e.g. `google-adk`, `google-gen
 | `embedding.model` | Model name or local path | `model/all-MiniLM-L6-v2` |
 | `chunking.size` | Chunk size (characters) | `512` |
 | `chunking.overlap` | Overlap between chunks | `64` |
-| `lineage.top_k` | FAISS candidates per internal chunk | `5` |
+| `lineage.top_k` | Number of closest external chunks to pass to LLM | `1` |
 | `agents.lineage_detect.model` | LLM for lineage agent | `gemini-2.0-flash` |
 
 ---
 
-## Running the Pipeline
+## Running the Web App
+
+The web app provides a UI for uploading PDFs, running the pipeline, listing documents, viewing content (HTML/MD), downloading PDFs, and viewing chunk lineage side-by-side.
+
+### Start the server
 
 From the project root:
 
 ```bash
-uv run python main.py convert      # Process-1: PDF → HTML/MD, update documents
-uv run python main.py chunk-store  # Process-2: Chunk, embed, store in DB + FAISS
-uv run python main.py lineage      # Process-3: Lineage detection, store lineage
-uv run python main.py all          # Run convert → chunk-store → lineage
+uv run uvicorn src.api.app:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Or, if the `riseapp` entrypoint is installed:
+Then open **http://localhost:8000** in a browser. The app serves the API at `/api` and the static front-end at `/`.
+
+### Upload & Processing
+
+1. **Upload**: Choose **Policy (external)** or **Rules (internal)**, select a PDF, and click Upload. Files are saved under `data/blob/external/<name>/` or `data/blob/internal/<name>/`.
+2. **Run pipeline**: After upload, use **Process 1 (Convert)**, **Process 2 (Chunk & Store)**, and **Process 3 (Lineage)**. If a step reports "Already processed", you can click **Yes, force** to reprocess.
+3. **Documents**: List all documents or filter by External (policy) / Internal (rules). Each row shows status (Converted, Chunked) and actions: **View**, **Download PDF**.
+4. **Viewing documents & lineage**: Open **View** to see the document in HTML or Markdown and a **Chunks** section. Each chunk lists **View linked chunk** links. Clicking one opens a **side-by-side** view: left = current chunk, right = linked chunk (from the other document).
+
+### API Reference
+
+Interactive API docs: **http://localhost:8000/docs** (Swagger UI).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/documents` | List documents (optional `?doc_type=external` or `internal`) |
+| GET | `/api/documents/{id}/content?format=html\|md\|pdf` | Document content or PDF download |
+| GET | `/api/documents/{id}/chunks` | Chunks for a document with `linked_chunk_ids` |
+| GET | `/api/chunks/{chunk_id}` | Full chunk content and document info |
+| POST | `/api/process/1`, `/api/process/2`, `/api/process/3` | Run process (body: `{"force": false}`) |
+| POST | `/api/upload` | Upload PDF (form: `file`, `doc_type=external\|internal`) |
+
+---
+
+## Running the Pipeline (CLI)
+
+### What is `riseapp`?
+
+The `riseapp` command is a CLI entrypoint defined in `pyproject.toml`:
+
+```toml
+[project.scripts]
+riseapp = "main:main"
+```
+
+This means when you run `uv run riseapp`, it executes the `main()` function from `main.py`. The `uv run` command ensures the virtual environment is activated and dependencies are available.
+
+### Basic Commands
+
+From the project root:
 
 ```bash
-uv run riseapp convert
-uv run riseapp chunk-store
-uv run riseapp lineage
-uv run riseapp all
+uv run riseapp convert      # Process-1: PDF → HTML/MD, update documents
+uv run riseapp chunk-store  # Process-2: Chunk, embed, store in DB + FAISS
+uv run riseapp lineage      # Process-3: Lineage detection, store lineage
+uv run riseapp all          # Run convert → chunk-store → lineage
 ```
 
-### Lineage agent (ADK web)
+Alternatively, run directly via Python:
 
-To run the lineage agent in the ADK web UI:
+```bash
+uv run python main.py convert
+uv run python main.py chunk-store
+uv run python main.py lineage
+uv run python main.py all
+```
+
+### Incremental vs Force Mode
+
+By default, each process is **incremental** — it skips items that have already been processed:
+
+- **Process-1**: Skips PDFs where `converted_at` is set and HTML/MD files exist
+- **Process-2**: Skips documents where `chunked_at >= updated_at`
+- **Process-3**: Skips internal chunks where `lineage_processed_at` is set
+
+To **force reprocessing**, use the `--force` (or `-f`) flag:
+
+```bash
+uv run riseapp convert --force      # Re-convert all PDFs, overwrite HTML/MD
+uv run riseapp chunk-store --force  # Clear vector store, re-chunk all documents
+uv run riseapp lineage --force      # Clear lineage table, reprocess all chunks
+uv run riseapp all --force          # Force all three processes
+```
+
+| Flag | Process-1 Effect | Process-2 Effect | Process-3 Effect |
+|------|------------------|------------------|------------------|
+| (none) | Skip converted docs | Skip chunked docs | Skip processed chunks |
+| `--force` | Re-convert all PDFs | Clear FAISS, re-chunk all | Clear lineage, reprocess all |
+
+### Lineage Agent (ADK Web)
+
+To run the lineage agent in the ADK web UI for interactive testing:
 
 ```bash
 uv run adk web --adk.agents.source-dir=src/agents/lineage_detect_agent
@@ -161,14 +240,56 @@ The agent exposes `root_agent` for discovery. Use the chat interface to exercise
 
 ### Tables
 
-- **`documents`**: `id`, `relative_path`, `doc_type` (`external`|`internal`), `name`, `has_pdf`, `has_html`, `has_md`, `created_at`, `updated_at`.
-- **`chunks`**: `id`, `document_id`, `chunk_index`, `content`, `metadata`, `created_at`.
-- **`lineage`**: `id`, `internal_chunk_id`, `external_chunk_id`, `confidence`, `created_at`.
+- **`documents`**: Tracks all documents (PDFs) in the blob.
+  - `id`, `relative_path`, `doc_type` (`external`|`internal`), `name`
+  - `has_pdf`, `has_html`, `has_md` — flags for file existence
+  - `created_at`, `updated_at` — timestamps
+  - `converted_at` — timestamp when Process-1 converted the PDF (NULL if not converted)
+  - `chunked_at` — timestamp when Process-2 chunked the document (NULL if not chunked)
+  - `lineage_at` — reserved for future use
 
-### Querying lineage
+- **`chunks`**: Stores chunked content from MD files.
+  - `id` (format: `{document_id}_{chunk_index}`), `document_id`, `chunk_index`, `content`, `metadata`
+  - `created_at` — timestamp
+  - `lineage_processed_at` — timestamp when Process-3 processed this chunk (NULL if not processed)
 
-- **Internal → external**: join `lineage` with `chunks` on `internal_chunk_id` to get external chunk(s) for each internal chunk.
-- **External → internal**: same join, but follow `external_chunk_id` to list internal chunks that interpret a given external chunk.
+- **`lineage`**: Links internal chunks to external chunks they interpret.
+  - `id`, `internal_chunk_id`, `external_chunk_id`, `confidence`, `created_at`
+
+### Querying Lineage
+
+**Internal → External**: Find external chunks that an internal chunk interprets:
+
+```sql
+SELECT l.*, c.content as external_content
+FROM lineage l
+JOIN chunks c ON c.id = l.external_chunk_id
+WHERE l.internal_chunk_id = '2_0';
+```
+
+**External → Internal**: Find internal chunks that interpret an external chunk:
+
+```sql
+SELECT l.*, c.content as internal_content
+FROM lineage l
+JOIN chunks c ON c.id = l.internal_chunk_id
+WHERE l.external_chunk_id = '1_0';
+```
+
+**Check Processing Status**:
+
+```sql
+-- Documents not yet converted
+SELECT * FROM documents WHERE converted_at IS NULL;
+
+-- Documents not yet chunked
+SELECT * FROM documents WHERE has_md = 1 AND (chunked_at IS NULL OR updated_at > chunked_at);
+
+-- Internal chunks not yet processed for lineage
+SELECT c.* FROM chunks c
+JOIN documents d ON d.id = c.document_id
+WHERE d.doc_type = 'internal' AND c.lineage_processed_at IS NULL;
+```
 
 ---
 
@@ -193,50 +314,75 @@ flowchart TB
   P2 -->|add vectors| VDB
   P2 -->|save index| VDB
   SQL -->|internal chunks| P3
-  VDB -->|search external candidates| P3
+  VDB -->|search top-1 external| P3
   P3 -->|lineage_detect_agent| P3
   P3 -->|insert lineage| SQL
 ```
 
-### Process-1: PDF convert
-
-```mermaid
-flowchart LR
-  A[Scan external and internal PDFs] --> B[Convert PDF to HTML]
-  B --> C[Convert PDF to MD]
-  C --> D[Write same folder as PDF]
-  D --> E[Upsert documents table]
-```
-
-### Process-2: Chunk and store
+### Process-1: PDF Convert (with --force option)
 
 ```mermaid
 flowchart TB
-  A[List docs with MD from DB] --> B[For each doc read MD from blob]
-  B --> C[Chunk MD]
-  C --> D[Embed via provider]
-  D --> E[Insert chunks table]
-  D --> F[Add to FAISS]
-  F --> G[Save FAISS index to data/vectordb]
+  A[Scan external/internal PDFs] --> B{--force?}
+  B -->|Yes| D[Convert PDF to HTML/MD]
+  B -->|No| C{Already converted?}
+  C -->|Yes| Skip[Skip document]
+  C -->|No| D
+  D --> E[Write HTML/MD to folder]
+  E --> F[Upsert documents table]
+  F --> G[Set converted_at timestamp]
 ```
 
-### Process-3: Lineage detection
+### Process-2: Chunk and Store (with --force option)
 
 ```mermaid
 flowchart TB
-  A[Load internal chunks from DB] --> B[For each internal chunk]
-  B --> C[Embed chunk]
-  C --> D[FAISS search external candidates]
-  D --> E[Fetch candidate chunks from DB]
-  E --> F[Call lineage_detect_agent]
-  F --> G[Parse external_chunk_ids]
-  G --> H[Insert lineage table]
-  H --> B
+  A[Start] --> B{--force?}
+  B -->|Yes| C1[Clear FAISS index]
+  C1 --> C2[Get ALL docs with MD]
+  C2 --> C3[Delete all chunks]
+  B -->|No| D[Get unprocessed docs]
+  C3 --> E
+  D --> E[For each document]
+  E --> F[Read MD from blob]
+  F --> G[Chunk MD]
+  G --> H[Embed chunks]
+  H --> I[Insert chunks to SQL]
+  I --> J[Add vectors to FAISS]
+  J --> K[Set chunked_at timestamp]
+  K --> L{More docs?}
+  L -->|Yes| E
+  L -->|No| M[Save FAISS index]
+```
+
+### Process-3: Lineage Detection (with --force option)
+
+```mermaid
+flowchart TB
+  A[Start] --> B{--force?}
+  B -->|Yes| C1[Clear lineage table]
+  C1 --> C2[Get ALL internal chunks]
+  B -->|No| D[Get unprocessed internal chunks]
+  C2 --> E
+  D --> E[For each internal chunk]
+  E --> F[Embed chunk]
+  F --> G[FAISS search top-1 external]
+  G --> H{Found match?}
+  H -->|No| I[Mark as processed]
+  H -->|Yes| J[Call lineage_detect_agent]
+  J --> K[Insert lineage if matched]
+  K --> L[Set lineage_processed_at]
+  I --> M{More chunks?}
+  L --> M
+  M -->|Yes| E
+  M -->|No| N[Done]
 ```
 
 ---
 
 ## Testing
+
+### Run All Tests
 
 ```bash
 uv run pytest test/ -v
@@ -249,9 +395,53 @@ pip install -r requirements.txt
 python -m pytest test/ -v
 ```
 
-- **Unit**: Chunker, embedding (HuggingFace), DB repos, FAISS.
-- **Integration**: Process-1 (in-memory DB, mocked where needed).
+### Run Individual Test Modules
+
+Each module can be tested independently:
+
+```bash
+# Test the chunker (text splitting logic)
+uv run pytest test/test_chunker.py -v
+
+# Test database operations (repositories, CRUD)
+uv run pytest test/test_db.py -v
+
+# Test embedding (HuggingFace model loading and embedding)
+uv run pytest test/test_embedding.py -v
+
+# Test vector database (FAISS operations)
+uv run pytest test/test_vectordb.py -v
+
+# Test Process-1 (PDF conversion flow)
+uv run pytest test/test_process_1.py -v
+```
+
+### Run Specific Test Functions
+
+```bash
+# Run a specific test function
+uv run pytest test/test_db.py::test_documents_crud -v
+
+# Run tests matching a keyword
+uv run pytest test/ -k "chunk" -v
+```
+
+### Test Coverage
+
+| Test File | Module Tested | Description |
+|-----------|---------------|-------------|
+| `test_chunker.py` | `src/chunking/chunker.py` | Markdown chunking with size/overlap |
+| `test_api.py` | `src/api/app.py` | REST API: documents, content, chunks, process, upload |
+| `test_db.py` | `src/db/repositories.py` | SQLite CRUD for documents, chunks, lineage |
+| `test_embedding.py` | `src/embedding/` | HuggingFace embedding model |
+| `test_vectordb.py` | `src/vectordb/faiss_store.py` | FAISS index add/search/save/load |
+| `test_process_1.py` | `src/processes/process_1_convert.py` | PDF → HTML/MD conversion |
+
+### Testing Tips
+
 - **Windows**: `faiss-cpu` may have no wheel; use WSL/conda or run only `test_chunker` and `test_db` if FAISS is unavailable.
+- **Async tests**: Tests use `pytest-asyncio` with `asyncio_mode = "auto"` configured in `pyproject.toml`.
+- **Isolated DB**: Tests use in-memory SQLite databases to avoid affecting production data.
 
 ---
 

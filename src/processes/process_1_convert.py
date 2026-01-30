@@ -53,12 +53,25 @@ def _convert_pdf(pdf_path: Path, out_dir: Path) -> tuple[bool, bool]:
         raise CustomException(f"Failed to convert {pdf_path}: {err_msg}{loc}")
 
 
-def run_process_1() -> None:
+def run_process_1(force: bool = False) -> None:
+    """
+    Process-1: Scan PDFs in blob, convert to HTML/MD, update documents table.
+    
+    Args:
+        force: If True, re-convert all PDFs even if already converted.
+               Existing HTML/MD files will be overwritten.
+    """
     cfg = get_config()
     blob = cfg.data_blob
     if not blob.exists():
         raise CustomException(f"Blob dir not found: {blob}")
     init_schema(get_connection())
+
+    if force:
+        logger.info("Process-1 running in FORCE mode - re-converting all documents")
+
+    converted_count = 0
+    skipped_count = 0
 
     for sub in ("external", "internal"):
         base = blob / sub
@@ -73,15 +86,33 @@ def run_process_1() -> None:
             pdf_path = pdfs[0]
             rel = f"{sub}/{doc_dir.name}/{pdf_path.stem}"
             name = pdf_path.stem
+            
+            # Check if already converted (skip check if force=True)
+            existing_doc = documents_repo.get_by_path(rel)
+            html_path = doc_dir / (pdf_path.stem + ".html")
+            md_path = doc_dir / (pdf_path.stem + ".md")
+            
+            if not force and existing_doc and existing_doc.converted_at:
+                if html_path.exists() and md_path.exists():
+                    logger.info("Skipping already converted doc", relative_path=rel, doc_id=existing_doc.id)
+                    skipped_count += 1
+                    continue
+            
+            # Convert the PDF (overwrites existing HTML/MD if force=True)
             has_pdf = True
             has_html = has_md = False
             try:
                 _convert_pdf(pdf_path, doc_dir)
-                has_html = (doc_dir / (pdf_path.stem + ".html")).exists()
-                has_md = (doc_dir / (pdf_path.stem + ".md")).exists()
+                has_html = html_path.exists()
+                has_md = md_path.exists()
+                converted_count += 1
             except Exception:
                 pass
+            
+            # Upsert and mark as converted
             doc_id = documents_repo.upsert(rel, sub, name, has_pdf, has_html, has_md)
-            logger.info("Process-1 doc", relative_path=rel, doc_id=doc_id)
+            if has_html and has_md:
+                documents_repo.mark_converted(doc_id)
+            logger.info("Process-1 doc", relative_path=rel, doc_id=doc_id, converted=True, force=force)
 
-    logger.info("Process-1 finished")
+    logger.info("Process-1 finished", converted=converted_count, skipped=skipped_count, force=force)

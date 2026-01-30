@@ -20,7 +20,10 @@ CREATE TABLE IF NOT EXISTS documents (
     has_html INTEGER NOT NULL DEFAULT 0,
     has_md INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    converted_at TEXT,
+    chunked_at TEXT,
+    lineage_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -29,7 +32,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index INTEGER NOT NULL,
     content TEXT NOT NULL,
     metadata TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    lineage_processed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS lineage (
@@ -43,6 +47,49 @@ CREATE TABLE IF NOT EXISTS lineage (
 CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_lineage_internal ON lineage(internal_chunk_id);
 CREATE INDEX IF NOT EXISTS idx_lineage_external ON lineage(external_chunk_id);
+"""
+
+MIGRATIONS = """
+-- Add processing tracking columns to documents table if they don't exist
+PRAGMA foreign_keys=off;
+
+-- Check and add converted_at column
+SELECT CASE 
+    WHEN COUNT(*) = 0 THEN 
+        'ALTER TABLE documents ADD COLUMN converted_at TEXT'
+    ELSE 'SELECT 1'
+END as sql
+FROM pragma_table_info('documents') 
+WHERE name='converted_at';
+
+-- Check and add chunked_at column
+SELECT CASE 
+    WHEN COUNT(*) = 0 THEN 
+        'ALTER TABLE documents ADD COLUMN chunked_at TEXT'
+    ELSE 'SELECT 1'
+END as sql
+FROM pragma_table_info('documents') 
+WHERE name='chunked_at';
+
+-- Check and add lineage_at column
+SELECT CASE 
+    WHEN COUNT(*) = 0 THEN 
+        'ALTER TABLE documents ADD COLUMN lineage_at TEXT'
+    ELSE 'SELECT 1'
+END as sql
+FROM pragma_table_info('documents') 
+WHERE name='lineage_at';
+
+-- Check and add lineage_processed_at column to chunks
+SELECT CASE 
+    WHEN COUNT(*) = 0 THEN 
+        'ALTER TABLE chunks ADD COLUMN lineage_processed_at TEXT'
+    ELSE 'SELECT 1'
+END as sql
+FROM pragma_table_info('chunks') 
+WHERE name='lineage_processed_at';
+
+PRAGMA foreign_keys=on;
 """
 
 _conn: Optional[sqlite3.Connection] = None
@@ -71,8 +118,41 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
         raise CustomException(f"Failed to connect to DB at {path}: {e}")
 
 
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Run migrations to add new columns to existing tables."""
+    try:
+        # Check and add converted_at to documents
+        cursor = conn.execute("PRAGMA table_info(documents)")
+        columns = [row[1] for row in cursor.fetchall()]
+        
+        if "converted_at" not in columns:
+            conn.execute("ALTER TABLE documents ADD COLUMN converted_at TEXT")
+            logger.info("Added converted_at column to documents table")
+        
+        if "chunked_at" not in columns:
+            conn.execute("ALTER TABLE documents ADD COLUMN chunked_at TEXT")
+            logger.info("Added chunked_at column to documents table")
+        
+        if "lineage_at" not in columns:
+            conn.execute("ALTER TABLE documents ADD COLUMN lineage_at TEXT")
+            logger.info("Added lineage_at column to documents table")
+        
+        # Check and add lineage_processed_at to chunks
+        cursor = conn.execute("PRAGMA table_info(chunks)")
+        columns = [row[1] for row in cursor.fetchall()]
+        
+        if "lineage_processed_at" not in columns:
+            conn.execute("ALTER TABLE chunks ADD COLUMN lineage_processed_at TEXT")
+            logger.info("Added lineage_processed_at column to chunks table")
+        
+        conn.commit()
+    except Exception as e:
+        logger.warning("Migration check/execution issue", error=str(e))
+
+
 def init_schema(conn: Optional[sqlite3.Connection] = None) -> None:
     c = conn or get_connection()
     c.executescript(SCHEMA)
     c.commit()
+    _run_migrations(c)
     logger.info("Schema initialized")
