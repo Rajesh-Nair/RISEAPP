@@ -183,6 +183,526 @@ Interactive API docs: **http://localhost:8000/docs** (Swagger UI).
 
 ---
 
+## API Endpoints - Detailed Flows
+
+This section provides detailed flow diagrams for each API endpoint, showing the complete execution path through the codebase including database operations, file system access, external service calls, and data transformations.
+
+### 1. GET `/api/documents`
+
+**Purpose**: Retrieve a list of all documents in the system with optional filtering by document type.
+
+**Use Case**: The web UI uses this to populate the documents list page. Users can view all documents or filter to see only external (regulatory) or internal (bank policy) documents.
+
+**Parameters**:
+- `doc_type` (optional): Filter by `external` or `internal`
+
+**Response**: Array of document objects with metadata, file availability flags, and processing timestamps.
+
+```mermaid
+flowchart TB
+    Start([GET /api/documents]) --> InitDB[Initialize DB Schema]
+    InitDB --> QueryDB[(Query documents table<br/>SELECT * FROM documents)]
+    QueryDB --> CheckFilter{doc_type<br/>parameter?}
+    CheckFilter -->|Yes| FilterDocs[Filter documents by type]
+    CheckFilter -->|No| BuildResponse[Build response array]
+    FilterDocs --> BuildResponse
+    BuildResponse --> FormatData[Format each document:<br/>id, relative_path, doc_type,<br/>name, has_pdf, has_html,<br/>has_md, converted_at, chunked_at]
+    FormatData --> Return([Return JSON array])
+
+    style QueryDB fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InitDB fill:#E0F7FA,stroke:#00838F,color:#000
+    style BuildResponse fill:#E0F7FA,stroke:#00838F,color:#000
+    style FormatData fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+### 2. GET `/api/documents/{doc_id}/content`
+
+**Purpose**: Retrieve the actual content of a specific document in the requested format (HTML, Markdown, or PDF).
+
+**Use Case**: When users click "View" on a document in the UI, this endpoint serves the document content. For PDFs, it triggers a download; for HTML/MD, it displays inline.
+
+**Parameters**:
+- `doc_id` (path): Document ID
+- `format` (query): `html`, `md`, or `pdf`
+
+**Response**: File content with appropriate Content-Type headers.
+
+```mermaid
+flowchart TB
+    Start([GET /api/documents/id/content]) --> InitDB[Initialize DB Schema]
+    InitDB --> QueryDoc[(Query document by ID<br/>SELECT * FROM documents<br/>WHERE id = ?)]
+    QueryDoc --> CheckDoc{Document<br/>exists?}
+    CheckDoc -->|No| Error404A[Return 404:<br/>Document not found]
+    CheckDoc -->|Yes| DetermineExt[Determine file extension<br/>based on format parameter]
+    DetermineExt --> BuildPath[Build file path:<br/>blob/relative_path.ext]
+    BuildPath --> ValidatePath{Path safe?<br/>No traversal?}
+    ValidatePath -->|No| Error404B[Return 404:<br/>Invalid path]
+    ValidatePath -->|Yes| CheckFile{File<br/>exists?}
+    CheckFile -->|No| Error404C[Return 404:<br/>File not found]
+    CheckFile -->|Yes| SetHeaders[Set Content-Type and<br/>Content-Disposition headers]
+    SetHeaders --> ReturnFile([Return FileResponse])
+
+    style QueryDoc fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InitDB fill:#E0F7FA,stroke:#00838F,color:#000
+    style BuildPath fill:#FFF3E0,stroke:#E65100,color:#000
+    style CheckFile fill:#FFF3E0,stroke:#E65100,color:#000
+```
+
+---
+
+### 3. GET `/api/documents/{doc_id}/content-annotated`
+
+**Purpose**: Retrieve document content along with all its chunks and their lineage relationships, providing a complete annotated view.
+
+**Use Case**: Powers the document viewer with inline chunk highlighting and lineage links. The frontend can display which parts of the document have lineage connections to other documents.
+
+**Parameters**:
+- `doc_id` (path): Document ID
+- `format` (query): `html` or `md` (default: `md`)
+
+**Response**: JSON with document metadata, full content, and annotated chunks with lineage information.
+
+```mermaid
+flowchart TB
+    Start([GET /api/documents/id/content-annotated]) --> InitDB[Initialize DB Schema]
+    InitDB --> QueryDoc[(Query document by ID)]
+    QueryDoc --> CheckDoc{Document<br/>exists?}
+    CheckDoc -->|No| Error404[Return 404]
+    CheckDoc -->|Yes| ReadFile[Read content file<br/>from blob directory]
+    ReadFile --> QueryChunks[(Query chunks for document<br/>SELECT * FROM chunks<br/>WHERE document_id = ?)]
+    QueryChunks --> LoopChunks[For each chunk]
+    LoopChunks --> CheckDocType{Document<br/>type?}
+    CheckDocType -->|internal| QueryExtLinks[(Query lineage table<br/>for external links<br/>WHERE internal_chunk_id = ?)]
+    CheckDocType -->|external| QueryIntLinks[(Query lineage table<br/>for internal links<br/>WHERE external_chunk_id = ?)]
+    QueryExtLinks --> GetLinkedChunks
+    QueryIntLinks --> GetLinkedChunks[(Get linked chunk details<br/>and document names)]
+    GetLinkedChunks --> BuildChunkObj[Build chunk object with:<br/>- Full content<br/>- Content preview 120 chars<br/>- Offsets start/end<br/>- Linked chunk IDs<br/>- Linked document info]
+    BuildChunkObj --> MoreChunks{More<br/>chunks?}
+    MoreChunks -->|Yes| LoopChunks
+    MoreChunks -->|No| BuildResponse[Build response with:<br/>- Document metadata<br/>- Full content<br/>- Format<br/>- Annotated chunks array]
+    BuildResponse --> Return([Return JSON])
+
+    style QueryDoc fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style QueryChunks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style QueryExtLinks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style QueryIntLinks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style GetLinkedChunks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style ReadFile fill:#FFF3E0,stroke:#E65100,color:#000
+    style InitDB fill:#E0F7FA,stroke:#00838F,color:#000
+    style BuildResponse fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+### 4. GET `/api/documents/{doc_id}/chunks`
+
+**Purpose**: Retrieve all chunks for a specific document with their lineage relationships, but without the full document content.
+
+**Use Case**: Used by the UI to display the chunks section below document content, showing chunk previews and "View linked chunk" buttons.
+
+**Parameters**:
+- `doc_id` (path): Document ID
+
+**Response**: Array of chunk objects with previews and linked chunk IDs.
+
+```mermaid
+flowchart TB
+    Start([GET /api/documents/id/chunks]) --> InitDB[Initialize DB Schema]
+    InitDB --> QueryDoc[(Query document by ID)]
+    QueryDoc --> CheckDoc{Document<br/>exists?}
+    CheckDoc -->|No| Error404[Return 404]
+    CheckDoc -->|Yes| QueryChunks[(Query chunks<br/>WHERE document_id = ?)]
+    QueryChunks --> LoopChunks[For each chunk]
+    LoopChunks --> CheckType{Doc type?}
+    CheckType -->|internal| GetExtLinks[(Get external linked chunks<br/>FROM lineage<br/>WHERE internal_chunk_id = ?)]
+    CheckType -->|external| GetIntLinks[(Get internal linked chunks<br/>FROM lineage<br/>WHERE external_chunk_id = ?)]
+    GetExtLinks --> CreatePreview
+    GetIntLinks --> CreatePreview[Create content preview<br/>120 chars + ellipsis]
+    CreatePreview --> BuildChunk[Build chunk object:<br/>- chunk_id, chunk_index<br/>- content_preview<br/>- start_offset, end_offset<br/>- linked_chunk_ids array]
+    BuildChunk --> MoreChunks{More<br/>chunks?}
+    MoreChunks -->|Yes| LoopChunks
+    MoreChunks -->|No| Return([Return JSON array])
+
+    style QueryDoc fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style QueryChunks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style GetExtLinks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style GetIntLinks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InitDB fill:#E0F7FA,stroke:#00838F,color:#000
+    style BuildChunk fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+### 5. GET `/api/chunks/{chunk_id}`
+
+**Purpose**: Retrieve detailed information about a single chunk, including its full content and parent document metadata.
+
+**Use Case**: Used in the side-by-side lineage viewer when clicking "View linked chunk". Fetches both the source and target chunks to display them together.
+
+**Parameters**:
+- `chunk_id` (path): Chunk ID in format `{document_id}_{chunk_index}`
+
+**Response**: JSON with chunk content and parent document information.
+
+```mermaid
+flowchart TB
+    Start([GET /api/chunks/chunk_id]) --> ValidateID{Validate chunk_id<br/>format: digit_digit?}
+    ValidateID -->|Invalid| Error400[Return 400:<br/>Invalid chunk_id format]
+    ValidateID -->|Valid| InitDB[Initialize DB Schema]
+    InitDB --> QueryChunk[(Query chunk by ID<br/>SELECT * FROM chunks<br/>WHERE id = ?)]
+    QueryChunk --> CheckChunk{Chunk<br/>exists?}
+    CheckChunk -->|No| Error404[Return 404:<br/>Chunk not found]
+    CheckChunk -->|Yes| QueryDoc[(Query parent document<br/>SELECT * FROM documents<br/>WHERE id = chunk.document_id)]
+    QueryDoc --> BuildDocInfo[Build document info:<br/>relative_path, doc_type, name]
+    BuildDocInfo --> BuildResponse[Build response:<br/>- chunk_id<br/>- document_id<br/>- chunk_index<br/>- content full<br/>- document object]
+    BuildResponse --> Return([Return JSON])
+
+    style QueryChunk fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style QueryDoc fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InitDB fill:#E0F7FA,stroke:#00838F,color:#000
+    style BuildResponse fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+### 6. POST `/api/chunk/related`
+
+**Purpose**: Find all chunks related to a given chunk through lineage relationships, used for dual-document comparison.
+
+**Use Case**: The React compare UI uses this to identify which chunks in document 2 are related to chunks in document 1, enabling synchronized scrolling and highlighting.
+
+**Request Body**:
+```json
+{
+  "source_document": "1",
+  "chunk_id": "1_0"
+}
+```
+
+**Response**: JSON with target document ID and related chunk IDs.
+
+```mermaid
+flowchart TB
+    Start([POST /api/chunk/related]) --> ValidateID{Validate<br/>chunk_id format?}
+    ValidateID -->|Invalid| Error400A[Return 400:<br/>Invalid chunk_id]
+    ValidateID -->|Valid| InitDB[Initialize DB Schema]
+    InitDB --> QueryChunk[(Query chunk by ID)]
+    QueryChunk --> CheckChunk{Chunk<br/>exists?}
+    CheckChunk -->|No| Error404A[Return 404:<br/>Chunk not found]
+    CheckChunk -->|Yes| ValidateDoc{chunk.document_id<br/>matches source?}
+    ValidateDoc -->|No| Error404B[Return 404:<br/>Chunk not in source doc]
+    ValidateDoc -->|Yes| QueryDoc[(Query document)]
+    QueryDoc --> CheckDocExists{Document<br/>exists?}
+    CheckDocExists -->|No| Error404C[Return 404:<br/>Document not found]
+    CheckDocExists -->|Yes| CheckType{Doc type?}
+    CheckType -->|internal| GetExtLinks[(Get lineage links<br/>WHERE internal_chunk_id = ?)]
+    CheckType -->|external| GetIntLinks[(Get lineage links<br/>WHERE external_chunk_id = ?)]
+    GetExtLinks --> ExtractIDs[Extract related chunk IDs]
+    GetIntLinks --> ExtractIDs
+    ExtractIDs --> GetTarget{Related<br/>chunks exist?}
+    GetTarget -->|Yes| QueryFirstRelated[(Query first related chunk<br/>to get target document_id)]
+    GetTarget -->|No| SetEmpty[Set target_document = empty]
+    QueryFirstRelated --> SetTarget[Set target_document ID]
+    SetEmpty --> BuildResponse
+    SetTarget --> BuildResponse[Build response:<br/>- relationship_group_id<br/>- target_document<br/>- related_chunks array]
+    BuildResponse --> Return([Return JSON])
+
+    style QueryChunk fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style QueryDoc fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style GetExtLinks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style GetIntLinks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style QueryFirstRelated fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InitDB fill:#E0F7FA,stroke:#00838F,color:#000
+    style BuildResponse fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+### 7. POST `/api/process/1`
+
+**Purpose**: Execute Process-1 (PDF conversion) to convert all PDFs in the blob directory to HTML and Markdown formats.
+
+**Use Case**: After uploading PDFs via the web UI, users click "Process 1 (Convert)" to trigger conversion. This is the first step in the pipeline.
+
+**Request Body**:
+```json
+{
+  "force": false
+}
+```
+
+**Response**: Status object indicating completion or already-processed state.
+
+```mermaid
+flowchart TB
+    Start([POST /api/process/1]) --> ParseBody[Parse request body<br/>extract force flag]
+    ParseBody --> InitDB[Initialize DB Schema]
+    InitDB --> CheckForce{force = true?}
+    CheckForce -->|No| CheckWork[Check if unconverted<br/>PDFs exist]
+    CheckWork --> HasWork{Work<br/>needed?}
+    HasWork -->|No| ReturnSkip[Return 200:<br/>already_processed<br/>force_available: true]
+    HasWork -->|Yes| StartProcess
+    CheckForce -->|Yes| StartProcess[Start Process-1]
+    StartProcess --> ScanDirs[Scan blob/external<br/>and blob/internal]
+    ScanDirs --> LoopDirs[For each document folder]
+    LoopDirs --> FindPDF[Find PDF file]
+    FindPDF --> HasPDF{PDF<br/>exists?}
+    HasPDF -->|No| NextDir
+    HasPDF -->|Yes| CheckConverted{force OR<br/>not converted?}
+    CheckConverted -->|Skip| LogSkip[Log: skipping converted doc]
+    CheckConverted -->|Convert| CallPyMuPDF[Call PyMuPDF to convert PDF]
+    CallPyMuPDF --> ExtractHTML[Extract HTML from each page<br/>using page.get_text html]
+    ExtractHTML --> ExtractText[Extract text from each page<br/>using page.get_text text]
+    ExtractText --> WriteHTML[Write HTML file to<br/>doc_dir/name.html]
+    WriteHTML --> WriteMD[Write MD file to<br/>doc_dir/name.md]
+    WriteMD --> UpsertDB[(Upsert documents table<br/>with file flags)]
+    UpsertDB --> MarkConverted[(Update converted_at<br/>timestamp)]
+    MarkConverted --> NextDir
+    LogSkip --> NextDir{More<br/>folders?}
+    NextDir -->|Yes| LoopDirs
+    NextDir -->|No| LogComplete[Log: Process-1 finished<br/>with counts]
+    LogComplete --> ReturnSuccess([Return 200:<br/>status: completed])
+
+    style CallPyMuPDF fill:#FFF3E0,stroke:#E65100,color:#000
+    style WriteHTML fill:#FFF3E0,stroke:#E65100,color:#000
+    style WriteMD fill:#FFF3E0,stroke:#E65100,color:#000
+    style UpsertDB fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style MarkConverted fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InitDB fill:#E0F7FA,stroke:#00838F,color:#000
+    style StartProcess fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+### 8. POST `/api/process/2`
+
+**Purpose**: Execute Process-2 (chunking and embedding) to split documents into chunks, generate embeddings, and build the FAISS vector index.
+
+**Use Case**: After conversion, users click "Process 2 (Chunk & Store)" to prepare documents for lineage detection. This creates the searchable vector database.
+
+**Request Body**:
+```json
+{
+  "force": false
+}
+```
+
+**Response**: Status object indicating completion or already-processed state.
+
+```mermaid
+flowchart TB
+    Start([POST /api/process/2]) --> ParseBody[Parse request body<br/>extract force flag]
+    ParseBody --> InitDB[Initialize DB Schema]
+    InitDB --> GetEmbedding[Get embedding provider<br/>from config]
+    GetEmbedding --> CheckProvider{Provider?}
+    CheckProvider -->|huggingface| LoadHF[Load HuggingFace model<br/>SentenceTransformer]
+    CheckProvider -->|google| LoadGoogle[Initialize Google<br/>embedding client]
+    LoadHF --> GetDim
+    LoadGoogle --> GetDim[Get embedding dimension]
+    GetDim --> InitFAISS[Initialize FAISS store<br/>IndexFlatIP]
+    InitFAISS --> CheckForce{force = true?}
+    CheckForce -->|Yes| ClearFAISS[Clear FAISS index]
+    ClearFAISS --> GetAllDocs[(Get ALL documents with MD)]
+    GetAllDocs --> DeleteAllChunks[(Delete all chunks<br/>from chunks table)]
+    CheckForce -->|No| CheckWork[Check for unprocessed docs]
+    CheckWork --> HasWork{Work<br/>needed?}
+    HasWork -->|No| ReturnSkip[Return 200:<br/>already_processed]
+    HasWork -->|Yes| GetUnprocessed
+    DeleteAllChunks --> ProcessDocs
+    GetUnprocessed[(Get unprocessed documents<br/>WHERE chunked_at IS NULL<br/>OR updated_at > chunked_at)] --> ProcessDocs[For each document]
+    ProcessDocs --> ReadMD[Read MD file from blob]
+    ReadMD --> ChunkText[Chunk text using chunker<br/>with size and overlap<br/>from config]
+    ChunkText --> HasChunks{Chunks<br/>created?}
+    HasChunks -->|No| MarkChunked1
+    HasChunks -->|Yes| EmbedChunks[Embed all chunk texts]
+    EmbedChunks --> CallEmbedding{Provider?}
+    CallEmbedding -->|huggingface| HFEmbed[HuggingFace:<br/>model.encode texts]
+    CallEmbedding -->|google| GoogleEmbed[Google API:<br/>embed_content with<br/>RETRIEVAL_DOCUMENT task]
+    HFEmbed --> NormalizeVecs
+    GoogleEmbed --> NormalizeVecs[Normalize vectors]
+    NormalizeVecs --> InsertChunks[(Insert chunks to DB<br/>with content and offsets)]
+    InsertChunks --> AddToFAISS[Add vectors to FAISS<br/>with chunk IDs and doc_types]
+    AddToFAISS --> MarkChunked1[(Update chunked_at timestamp)]
+    MarkChunked1 --> MoreDocs{More<br/>docs?}
+    MoreDocs -->|Yes| ProcessDocs
+    MoreDocs -->|No| SaveFAISS[Save FAISS index and<br/>metadata to disk]
+    SaveFAISS --> LogComplete[Log: Process-2 finished]
+    LogComplete --> ReturnSuccess([Return 200:<br/>status: completed])
+
+    style LoadHF fill:#E8F5E9,stroke:#388E3C,color:#000
+    style LoadGoogle fill:#E8F5E9,stroke:#388E3C,color:#000
+    style HFEmbed fill:#E8F5E9,stroke:#388E3C,color:#000
+    style GoogleEmbed fill:#E8F5E9,stroke:#388E3C,color:#000
+    style InitFAISS fill:#FFF9C4,stroke:#F57C00,color:#000
+    style ClearFAISS fill:#FFF9C4,stroke:#F57C00,color:#000
+    style AddToFAISS fill:#FFF9C4,stroke:#F57C00,color:#000
+    style SaveFAISS fill:#FFF9C4,stroke:#F57C00,color:#000
+    style ReadMD fill:#FFF3E0,stroke:#E65100,color:#000
+    style GetAllDocs fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style DeleteAllChunks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style GetUnprocessed fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InsertChunks fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style MarkChunked1 fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InitDB fill:#E0F7FA,stroke:#00838F,color:#000
+    style ChunkText fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+### 9. POST `/api/process/3`
+
+**Purpose**: Execute Process-3 (lineage detection) to identify relationships between internal and external document chunks using vector similarity and LLM validation.
+
+**Use Case**: Final pipeline step. After chunking, users click "Process 3 (Lineage)" to detect which internal policy chunks interpret which external regulatory chunks.
+
+**Request Body**:
+```json
+{
+  "force": false
+}
+```
+
+**Response**: Status object indicating completion or already-processed state.
+
+```mermaid
+flowchart TB
+    Start([POST /api/process/3]) --> ParseBody[Parse request body<br/>extract force flag]
+    ParseBody --> InitDB[Initialize DB Schema]
+    InitDB --> CheckForce{force = true?}
+    CheckForce -->|Yes| ClearLineage[(Delete all lineage entries<br/>DELETE FROM lineage)]
+    ClearLineage --> GetAllInternal[(Get ALL internal chunks)]
+    CheckForce -->|No| CheckWork[Check for unprocessed<br/>internal chunks]
+    CheckWork --> HasWork{Work<br/>needed?}
+    HasWork -->|No| ReturnSkip[Return 200:<br/>already_processed]
+    HasWork -->|Yes| GetUnprocessed
+    GetAllInternal --> LoadResources
+    GetUnprocessed[(Get unprocessed internal chunks<br/>WHERE lineage_processed_at IS NULL)] --> LoadResources[Load embedding provider<br/>and FAISS store]
+    LoadResources --> GetTopK[Get top_k from config<br/>default: 1]
+    GetTopK --> LoopChunks[For each internal chunk]
+    LoopChunks --> EmbedChunk[Embed chunk content]
+    EmbedChunk --> CallEmbed{Provider?}
+    CallEmbed -->|huggingface| HFEmbed[HuggingFace: encode]
+    CallEmbed -->|google| GoogleEmbed[Google: embed_content]
+    HFEmbed --> SearchFAISS
+    GoogleEmbed --> SearchFAISS[Search FAISS for top-1<br/>external chunk<br/>with doc_type filter]
+    SearchFAISS --> HasMatch{Match<br/>found?}
+    HasMatch -->|No| MarkProcessed1
+    HasMatch -->|Yes| GetChunk[(Query matched chunk<br/>from chunks table)]
+    GetChunk --> ChunkExists{Chunk<br/>exists?}
+    ChunkExists -->|No| MarkProcessed1
+    ChunkExists -->|Yes| BuildPrompt[Build lineage detection prompt<br/>with internal chunk and<br/>external candidate]
+    BuildPrompt --> CallAgent[Call Google ADK<br/>lineage_detect_agent]
+    CallAgent --> InitSession[Create ADK session<br/>InMemorySessionService]
+    InitSession --> RunAgent[Run agent with Gemini LLM<br/>using system and match prompts]
+    RunAgent --> ParseResponse[Parse agent response<br/>extract external_chunk_ids<br/>and confidence]
+    ParseResponse --> HasLineage{Lineage<br/>detected?}
+    HasLineage -->|Yes| InsertLineage[(Insert lineage record<br/>internal_chunk_id,<br/>external_chunk_id, confidence)]
+    HasLineage -->|No| MarkProcessed1
+    InsertLineage --> MarkProcessed1[(Update lineage_processed_at<br/>timestamp)]
+    MarkProcessed1 --> MoreChunks{More<br/>chunks?}
+    MoreChunks -->|Yes| LoopChunks
+    MoreChunks -->|No| LogComplete[Log: Process-3 finished<br/>with counts]
+    LogComplete --> ReturnSuccess([Return 200:<br/>status: completed])
+
+    style HFEmbed fill:#E8F5E9,stroke:#388E3C,color:#000
+    style GoogleEmbed fill:#E8F5E9,stroke:#388E3C,color:#000
+    style SearchFAISS fill:#FFF9C4,stroke:#F57C00,color:#000
+    style CallAgent fill:#E3F2FD,stroke:#1976D2,color:#000
+    style InitSession fill:#E3F2FD,stroke:#1976D2,color:#000
+    style RunAgent fill:#E3F2FD,stroke:#1976D2,color:#000
+    style ClearLineage fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style GetAllInternal fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style GetUnprocessed fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style GetChunk fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InsertLineage fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style MarkProcessed1 fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    style InitDB fill:#E0F7FA,stroke:#00838F,color:#000
+    style BuildPrompt fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+### 10. POST `/api/upload`
+
+**Purpose**: Upload a PDF file to the blob directory, creating the necessary folder structure.
+
+**Use Case**: Web UI upload form allows users to select a PDF and specify whether it's an external (regulatory) or internal (bank policy) document.
+
+**Request**: Multipart form data with `file` and `doc_type` fields.
+
+**Response**: JSON with uploaded file path and document type.
+
+```mermaid
+flowchart TB
+    Start([POST /api/upload]) --> ParseForm[Parse multipart form data<br/>file and doc_type]
+    ParseForm --> ValidateFile{File is PDF?<br/>Check extension}
+    ValidateFile -->|No| Error400A[Return 400:<br/>PDF file required]
+    ValidateFile -->|Yes| ExtractStem[Extract filename stem<br/>without extension]
+    ExtractStem --> ValidateStem{Valid<br/>filename?}
+    ValidateStem -->|No| Error400B[Return 400:<br/>Invalid filename]
+    ValidateStem -->|Yes| GetBlobPath[Get blob root path<br/>from config]
+    GetBlobPath --> BuildFolder[Build folder path:<br/>blob/doc_type/stem/]
+    BuildFolder --> CreateFolder[Create folder structure<br/>mkdir with parents]
+    CreateFolder --> BuildDestPath[Build destination path:<br/>folder/stem.pdf]
+    BuildDestPath --> ReadFileContent[Read uploaded file content<br/>from request]
+    ReadFileContent --> WriteFile[Write PDF to destination]
+    WriteFile --> BuildRelPath[Build relative path:<br/>doc_type/stem/stem]
+    BuildRelPath --> ReturnSuccess([Return 201:<br/>path, doc_type])
+
+    style CreateFolder fill:#FFF3E0,stroke:#E65100,color:#000
+    style WriteFile fill:#FFF3E0,stroke:#E65100,color:#000
+    style ParseForm fill:#E0F7FA,stroke:#00838F,color:#000
+    style BuildFolder fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+### 11. GET `/compare` and `/compare/`
+
+**Purpose**: Serve the dual-document comparison React application for side-by-side document viewing.
+
+**Use Case**: Users navigate to `/compare/#/1/2` to view documents 1 and 2 side-by-side with synchronized scrolling and lineage highlighting. Useful for comparing regulatory requirements with bank policies.
+
+**Parameters**: None (uses hash routing in frontend, e.g., `#/1/2`)
+
+**Response**: HTML page serving the React application.
+
+```mermaid
+flowchart TB
+    Start([GET /compare or /compare/]) --> BuildPath[Build path to compare UI:<br/>static/compare/index.html]
+    BuildPath --> CheckExists{index.html<br/>exists?}
+    CheckExists -->|No| Error404[Return 404:<br/>Compare UI not built<br/>Run: cd frontend && npm run build]
+    CheckExists -->|Yes| ReturnHTML([Return FileResponse<br/>Content-Type: text/html])
+    ReturnHTML --> BrowserLoads[Browser loads React app]
+    BrowserLoads --> ParseHash[React router parses<br/>hash route: #/doc1/doc2]
+    ParseHash --> FetchDocs[React app calls:<br/>GET /api/documents/1/content-annotated<br/>GET /api/documents/2/content-annotated]
+    FetchDocs --> FetchRelated[React app calls:<br/>POST /api/chunk/related<br/>for each chunk]
+    FetchRelated --> RenderUI[Render side-by-side view<br/>with synchronized scrolling<br/>and lineage highlighting]
+
+    style BuildPath fill:#FFF3E0,stroke:#E65100,color:#000
+    style CheckExists fill:#FFF3E0,stroke:#E65100,color:#000
+    style BrowserLoads fill:#E0F7FA,stroke:#00838F,color:#000
+    style ParseHash fill:#E0F7FA,stroke:#00838F,color:#000
+    style RenderUI fill:#E0F7FA,stroke:#00838F,color:#000
+```
+
+---
+
+## Color Legend for Flow Diagrams
+
+The mermaid diagrams above use the following color coding to distinguish different types of operations:
+
+- **Light Blue** - External Services (Google ADK/Gemini LLM calls)
+- **Light Green** - Embedding Models (HuggingFace or Google embeddings)
+- **Light Yellow** - FAISS Vector Database operations
+- **Light Purple** - SQLite Database operations
+- **Light Orange** - File System operations
+- **Light Cyan** - General processing and transformation nodes
+
+---
+
 ## Running the Pipeline (CLI)
 
 ### What is `riseapp`?
