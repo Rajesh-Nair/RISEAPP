@@ -4,6 +4,58 @@ RiseApp detects **data lineage** between **external** (regulatory) and **interna
 
 ---
 
+## Table of Contents
+
+- [Introduction](#introduction)
+  - [Key Features](#key-features)
+- [Architecture Overview](#architecture-overview)
+- [Setup](#setup)
+  - [1. Environment and packages (uv)](#1-environment-and-packages-uv)
+  - [2. `.env` and config](#2-env-and-config)
+  - [3. Compare UI (optional)](#3-compare-ui-optional)
+- [Folder Structure](#folder-structure)
+- [Configuration Reference](#configuration-reference)
+- [Running the Web App](#running-the-web-app)
+  - [Start the server](#start-the-server)
+  - [Upload & Processing](#upload--processing)
+  - [API Reference](#api-reference)
+- [API Endpoints - Detailed Flows](#api-endpoints---detailed-flows)
+  - [1. GET `/api/documents`](#1-get-apidocuments)
+  - [2. GET `/api/documents/{doc_id}/content`](#2-get-apidocumentsdoc_idcontent)
+  - [3. GET `/api/documents/{doc_id}/content-annotated`](#3-get-apidocumentsdoc_idcontent-annotated)
+  - [4. GET `/api/documents/{doc_id}/chunks`](#4-get-apidocumentsdoc_idchunks)
+  - [5. GET `/api/chunks/{chunk_id}`](#5-get-apichunkschunk_id)
+  - [6. POST `/api/chunk/related`](#6-post-apichunkrelated)
+  - [7. POST `/api/process/1`](#7-post-apiprocess1)
+  - [8. POST `/api/process/2`](#8-post-apiprocess2)
+  - [9. POST `/api/process/3`](#9-post-apiprocess3)
+  - [10. POST `/api/upload`](#10-post-apiupload)
+  - [11. GET `/compare` and `/compare/`](#11-get-compare-and-compare)
+- [Color Legend for Flow Diagrams](#color-legend-for-flow-diagrams)
+- [Running the Pipeline (CLI)](#running-the-pipeline-cli)
+  - [What is `riseapp`?](#what-is-riseapp)
+  - [Basic Commands](#basic-commands)
+  - [Incremental vs Force Mode](#incremental-vs-force-mode)
+  - [Lineage Agent (ADK Web)](#lineage-agent-adk-web)
+- [Database Schema and Lineage Queries](#database-schema-and-lineage-queries)
+  - [Tables](#tables)
+  - [Querying Lineage](#querying-lineage)
+- [Flows (Mermaid)](#flows-mermaid)
+  - [End-to-end](#end-to-end)
+  - [Process-1: PDF Convert (with --force option)](#process-1-pdf-convert-with---force-option)
+  - [Process-2: Chunk and Store (with --force option)](#process-2-chunk-and-store-with---force-option)
+  - [Process-3: Lineage Detection (with --force option)](#process-3-lineage-detection-with---force-option)
+- [Testing](#testing)
+  - [Run All Tests](#run-all-tests)
+  - [Run Individual Test Modules](#run-individual-test-modules)
+  - [Run Specific Test Functions](#run-specific-test-functions)
+  - [Test Coverage](#test-coverage)
+  - [Testing Tips](#testing-tips)
+- [Verification Checklist](#verification-checklist)
+- [Embedding and Lineage Agent](#embedding-and-lineage-agent)
+
+---
+
 ## Introduction
 
 **External documents** are publicly available regulatory policies. **Internal documents** are the bank’s interpretations and implementation guidance. RiseApp:
@@ -774,21 +826,54 @@ The agent exposes `root_agent` for discovery. Use the chat interface to exercise
 
 ### Tables
 
-- **`documents`**: Tracks all documents (PDFs) in the blob.
-  - `id`, `relative_path`, `doc_type` (`external`|`internal`), `name`
-  - `has_pdf`, `has_html`, `has_md` — flags for file existence
-  - `created_at`, `updated_at` — timestamps
-  - `converted_at` — timestamp when Process-1 converted the PDF (NULL if not converted)
-  - `chunked_at` — timestamp when Process-2 chunked the document (NULL if not chunked)
-  - `lineage_at` — reserved for future use
+All tables live in the SQLite database at `data/sql/riseapp.db`. Indexes: `idx_chunks_document_id` on `chunks(document_id)`, `idx_lineage_internal` on `lineage(internal_chunk_id)`, `idx_lineage_external` on `lineage(external_chunk_id)`.
 
-- **`chunks`**: Stores chunked content from MD files.
-  - `id` (format: `{document_id}_{chunk_index}`), `document_id`, `chunk_index`, `content`, `metadata`
-  - `created_at` — timestamp
-  - `lineage_processed_at` — timestamp when Process-3 processed this chunk (NULL if not processed)
+#### `documents`
 
-- **`lineage`**: Links internal chunks to external chunks they interpret.
-  - `id`, `internal_chunk_id`, `external_chunk_id`, `confidence`, `created_at`
+Tracks all documents (PDFs) in the blob.
+
+| Column | Type | Use |
+|--------|------|-----|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | Auto-increment document ID. |
+| `relative_path` | TEXT NOT NULL UNIQUE | Path under blob, e.g. `external/name/name` or `internal/name/name`. |
+| `doc_type` | TEXT NOT NULL | `external` (regulatory) or `internal` (bank policy). |
+| `name` | TEXT NOT NULL | Document name/stem (filename without extension). |
+| `has_pdf` | INTEGER NOT NULL DEFAULT 0 | 1 if PDF file exists in blob folder. |
+| `has_html` | INTEGER NOT NULL DEFAULT 0 | 1 if HTML file exists. |
+| `has_md` | INTEGER NOT NULL DEFAULT 0 | 1 if Markdown file exists. |
+| `created_at` | TEXT NOT NULL | Record creation time (ISO datetime). |
+| `updated_at` | TEXT NOT NULL | Record last update time. |
+| `converted_at` | TEXT | When Process-1 converted the PDF to HTML/MD; NULL if not converted. |
+| `chunked_at` | TEXT | When Process-2 chunked the document; NULL if not chunked. |
+| `lineage_at` | TEXT | Reserved for future use. |
+
+#### `chunks`
+
+Stores chunked content from MD files; used for embedding and lineage.
+
+| Column | Type | Use |
+|--------|------|-----|
+| `id` | TEXT PRIMARY KEY | Chunk ID in format `{document_id}_{chunk_index}`. |
+| `document_id` | INTEGER NOT NULL | References `documents.id`. |
+| `chunk_index` | INTEGER NOT NULL | Zero-based index of this chunk within the document. |
+| `content` | TEXT NOT NULL | Chunk text content. |
+| `metadata` | TEXT | Optional JSON metadata; may be NULL. |
+| `created_at` | TEXT NOT NULL | Insert time (ISO datetime). |
+| `lineage_processed_at` | TEXT | When Process-3 processed this chunk for lineage; NULL if not processed. |
+| `start_offset` | INTEGER | Start character offset of this chunk in the source MD (from migrations). |
+| `end_offset` | INTEGER | End character offset of this chunk in the source MD (from migrations). |
+
+#### `lineage`
+
+Links internal chunks to external chunks they interpret (detected by Process-3).
+
+| Column | Type | Use |
+|--------|------|-----|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | Auto-increment row ID. |
+| `internal_chunk_id` | TEXT NOT NULL | References `chunks.id` (chunk from an internal document). |
+| `external_chunk_id` | TEXT NOT NULL | References `chunks.id` (chunk from an external document). |
+| `confidence` | REAL | Agent confidence score for this link; may be NULL. |
+| `created_at` | TEXT NOT NULL | Insert time (ISO datetime). |
 
 ### Querying Lineage
 
